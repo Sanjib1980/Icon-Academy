@@ -14,6 +14,19 @@ export const AdmissionSlipPrintModal: React.FC<AdmissionSlipPrintModalProps> = (
   onClose,
   autoPrint = true,
 }) => {
+  // Keyboard shortcut: Press Escape to close admission slip modal
+  useEffect(() => {
+    if (!admission) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [admission, onClose]);
+
   useEffect(() => {
     if (admission && autoPrint) {
       // Small timeout to allow DOM to paint before opening native print dialog
@@ -46,36 +59,38 @@ export const AdmissionSlipPrintModal: React.FC<AdmissionSlipPrintModalProps> = (
   const isPaymentVerified = admission.utrNumber && admission.utrNumber !== 'SUBMITTED_PRE_PAYMENT';
 
   return (
-    <div className="fixed inset-0 z-[9999] bg-[#00163d]/80 backdrop-blur-xs overflow-y-auto flex flex-col items-center p-3 sm:p-6">
-      {/* Top Floating Control Bar (Hidden when printed) */}
-      <div className="no-print w-full max-w-4xl bg-white rounded-xl shadow-lg border border-[#dee8ff] p-3 mb-4 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-[#0051d5] text-[24px]">print</span>
-          <div>
-            <h3 className="font-headline text-sm font-bold text-[#00163d]">
-              Print Admission Slip: {admission.studentName}
+    <div className="fixed inset-0 z-[9999] bg-[#00163d]/80 backdrop-blur-xs overflow-y-auto flex flex-col items-center p-2 sm:p-6">
+      {/* Top Floating Sticky Control Bar (Hidden when printed) */}
+      <div className="no-print w-full max-w-4xl bg-white rounded-xl shadow-lg border border-[#dee8ff] p-3 mb-4 flex flex-wrap items-center justify-between gap-2 sticky top-2 z-30">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="material-symbols-outlined text-[#0051d5] text-[24px] shrink-0">print</span>
+          <div className="min-w-0">
+            <h3 className="font-headline text-sm font-bold text-[#00163d] truncate">
+              OFFICIAL ADMISSION SLIP / CARD PREVIEW: {admission.studentName}
             </h3>
-            <span className="text-[11px] text-[#747780]">
+            <span className="text-[11px] text-[#747780] block truncate">
               Enrollment No: <strong className="font-mono text-[#0051d5]">{enrollmentNumber}</strong> • Branch: <strong>{branchName} ({branchCode})</strong>
             </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={() => window.print()}
-            className="px-4 py-2 rounded-xl bg-[#0051d5] hover:bg-[#316bf3] text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
+            className="px-3.5 py-2 rounded-xl bg-[#0051d5] hover:bg-[#316bf3] text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer active:scale-95"
           >
             <span className="material-symbols-outlined text-[16px]">print</span>
-            <span>Print Now</span>
+            <span>Print Slip</span>
           </button>
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-[#44464f] text-xs font-bold transition-all cursor-pointer"
+            className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer active:scale-95"
+            title="Close slip preview"
           >
-            Close
+            <span className="material-symbols-outlined text-[16px]">close</span>
+            <span>Close</span>
           </button>
         </div>
       </div>
@@ -270,6 +285,39 @@ export const AdmissionSlipPrintModal: React.FC<AdmissionSlipPrintModalProps> = (
               <span className="text-[8px] text-[#747780]">IAIT Central Office</span>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* Bottom Floating Sticky Control Bar (Hidden when printed) */}
+      <div className="no-print w-full max-w-4xl bg-white rounded-xl shadow-lg border border-[#dee8ff] p-3 mt-4 flex flex-wrap items-center justify-between gap-2 sticky bottom-2 z-30">
+        <button
+          type="button"
+          onClick={onClose}
+          className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#00163d] text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer border border-slate-300 active:scale-95 shadow-2xs"
+          title="Return to Admission page"
+        >
+          <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+          <span>← Back to Admission</span>
+        </button>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="px-4 py-2.5 rounded-xl bg-[#0051d5] hover:bg-[#316bf3] text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer active:scale-95"
+          >
+            <span className="material-symbols-outlined text-[16px]">print</span>
+            <span>Print Slip</span>
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer active:scale-95"
+            title="Close modal and return to Admission"
+          >
+            <span className="material-symbols-outlined text-[16px]">close</span>
+            <span>Close / Back to Admission</span>
+          </button>
         </div>
       </div>
     </div>

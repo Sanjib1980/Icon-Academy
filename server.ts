@@ -856,16 +856,30 @@ async function startServer() {
   app.get('/api/students/:enrollmentId', (req, res) => {
     const db = loadDatabase();
     const enrollment = String(req.params.enrollmentId).trim().toLowerCase();
+    const digits = enrollment.replace(/\D/g, '');
     
     // Check in db.students
-    let student = db.students.find((s) => s.enrollmentId.toLowerCase() === enrollment);
+    let student = db.students.find((s) => {
+      const sId = s.enrollmentId.toLowerCase();
+      return (
+        sId === enrollment ||
+        (digits && sId.replace(/\D/g, '') === digits)
+      );
+    });
     
     // Check in db.admissions
     if (!student) {
       const adm = db.admissions.find(
-        (a) =>
-          (a.enrollmentId && a.enrollmentId.toLowerCase() === enrollment) ||
-          (a.id && a.id.toLowerCase() === enrollment)
+        (a) => {
+          const aEnroll = String(a.enrollmentId || '').toLowerCase();
+          const aId = String(a.id || '').toLowerCase();
+          return (
+            aEnroll === enrollment ||
+            aId === enrollment ||
+            (digits && aEnroll.replace(/\D/g, '') === digits) ||
+            (digits && aId.replace(/\D/g, '') === digits)
+          );
+        }
       );
       if (adm) {
         student = {

@@ -1,14 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { StudentRecord, AdmissionApplication } from '../types';
 import {
-  findStudentByQuery,
-  getStoredStudents,
-  getStoredApplications,
-  setStoredApplications,
   getStaffPasscode,
   setStaffPasscode,
   resetStaffPasscodeToDefault,
+  getStoredStudents,
+  getStoredApplications,
 } from '../data/studentsData';
+import { verifyStudentWithStatus } from '../services/centralDbService';
 
 interface VerifyStudentScreenProps {
   onOpenCertificateModal: (student: StudentRecord) => void;
@@ -24,18 +23,8 @@ export const VerifyStudentScreen: React.FC<VerifyStudentScreenProps> = ({
   const [searchedRecord, setSearchedRecord] = useState<StudentRecord | null>(null);
   const [hasSearched, setHasSearched] = useState<boolean>(false);
   const [invalidQueryString, setInvalidQueryString] = useState<string>('');
-
-  // Synchronize latest applications from server database so Verify Student has immediate access to real records
-  useEffect(() => {
-    fetch('/api/admissions')
-      .then((r) => r.json())
-      .then((res) => {
-        if (res && res.success && Array.isArray(res.admissions)) {
-          setStoredApplications(res.admissions);
-        }
-      })
-      .catch(() => {});
-  }, []);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [isSearching, setIsSearching] = useState<boolean>(false);
 
   // Staff Portal Passcode state
   const [passcode, setPasscode] = useState<string>('');
@@ -61,6 +50,10 @@ export const VerifyStudentScreen: React.FC<VerifyStudentScreenProps> = ({
   // Selected student to view all attached files
   const [selectedAppForFiles, setSelectedAppForFiles] = useState<AdmissionApplication | null>(null);
 
+  // Student photo display state
+  const [photoLoadError, setPhotoLoadError] = useState<boolean>(false);
+  const [isPhotoPreviewOpen, setIsPhotoPreviewOpen] = useState<boolean>(false);
+
   const handleSearch = async (overrideQuery?: string) => {
     const q = overrideQuery !== undefined ? overrideQuery : query;
     const clean = String(q || '').trim();
@@ -69,30 +62,45 @@ export const VerifyStudentScreen: React.FC<VerifyStudentScreenProps> = ({
       return;
     }
 
-    // 1. Read enrollment number as a STRING (DO NOT convert to Number)
-    // Search the SAME persistent student/admission records used by the Admin Panel
-    let found = findStudentByQuery(clean);
+    setIsSearching(true);
+    setSearchError(null);
+    setSearchedRecord(null);
+    setInvalidQueryString('');
+    setPhotoLoadError(false);
 
-    // 2. If not found in current local cache, query server API
-    if (!found) {
-      try {
-        const res = await fetch('/api/admissions').then((r) => r.json());
-        if (res && res.success && Array.isArray(res.admissions)) {
-          setStoredApplications(res.admissions);
-          found = findStudentByQuery(clean);
-        }
-      } catch {
-        // Ignore network errors
+    try {
+      // 1. Authoritative: Query the CENTRAL PERSISTENT SUPABASE DATABASE directly
+      // This works from ANY PC, laptop, Android phone, tablet or browser!
+      const res = await verifyStudentWithStatus(clean);
+      setHasSearched(true);
+
+      if (res.status === 'FOUND' && res.student) {
+        setSearchedRecord(res.student);
+        setSearchError(null);
+        setInvalidQueryString('');
+      } else if (res.status === 'NETWORK_ERROR') {
+        setSearchedRecord(null);
+        setSearchError(
+          res.errorMessage ||
+            'Database/Network Error: Unable to reach the central database. Please check your internet connection and try again.'
+        );
+        setInvalidQueryString('');
+      } else {
+        // Record Not Found in Central Database
+        setSearchedRecord(null);
+        setSearchError(null);
+        setInvalidQueryString(clean);
       }
-    }
-
-    setHasSearched(true);
-    if (found) {
-      setSearchedRecord(found);
-      setInvalidQueryString('');
-    } else {
+    } catch (err: any) {
+      console.warn('[VerifyStudent] Central verification error:', err);
+      setHasSearched(true);
       setSearchedRecord(null);
-      setInvalidQueryString(clean);
+      setSearchError(
+        'Database/Network Error: Unable to reach the central database. Please check your internet connection and try again.'
+      );
+      setInvalidQueryString('');
+    } finally {
+      setIsSearching(false);
     }
   };
 
@@ -282,11 +290,14 @@ export const VerifyStudentScreen: React.FC<VerifyStudentScreenProps> = ({
           />
           <button
             type="button"
+            disabled={isSearching}
             onClick={() => handleSearch()}
-            className="absolute right-1.5 px-3 py-2 rounded-md bg-[#0051d5] hover:bg-[#316bf3] text-white text-xs font-bold flex items-center gap-1 shadow-xs active:scale-95 transition-all cursor-pointer"
+            className="absolute right-1.5 px-3 py-2 rounded-md bg-[#0051d5] hover:bg-[#316bf3] text-white text-xs font-bold flex items-center gap-1 shadow-xs active:scale-95 transition-all cursor-pointer disabled:opacity-75"
           >
-            <span className="material-symbols-outlined text-[16px]">manage_search</span>
-            <span>Verify</span>
+            <span className={`material-symbols-outlined text-[16px] ${isSearching ? 'animate-spin' : ''}`}>
+              {isSearching ? 'progress_activity' : 'manage_search'}
+            </span>
+            <span>{isSearching ? 'Verifying...' : 'Verify'}</span>
           </button>
         </div>
       </div>
@@ -327,21 +338,36 @@ export const VerifyStudentScreen: React.FC<VerifyStudentScreenProps> = ({
             </div>
 
             {/* Identity Profile Strip */}
-            <div className="flex items-start gap-3 p-3 rounded-lg bg-[#f0f3ff] border border-[#dee8ff]">
+            <div className="flex items-start gap-3.5 p-3.5 rounded-xl bg-[#f0f3ff] border border-[#dee8ff]">
               <div className="relative shrink-0">
-                {searchedRecord.photoUrl ? (
-                  <img
-                    className="w-16 h-20 rounded-lg object-cover shadow-xs bg-[#e7eeff] border border-white"
-                    alt={searchedRecord.name}
-                    src={searchedRecord.photoUrl}
-                  />
+                {searchedRecord.photoUrl && !photoLoadError ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsPhotoPreviewOpen(true)}
+                    className="relative block rounded-lg overflow-hidden group cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#0051d5] shadow-xs"
+                    title="Click to view full verified student photo"
+                  >
+                    <img
+                      className="w-20 h-24 sm:w-24 sm:h-28 rounded-lg object-cover bg-[#e7eeff] border-2 border-white transition-transform group-hover:scale-105"
+                      alt={`Verified student ${searchedRecord.name}`}
+                      src={searchedRecord.photoUrl}
+                      onError={() => {
+                        console.warn('[VerifyStudent] Student photo failed to render, switching to fallback badge:', searchedRecord.photoUrl);
+                        setPhotoLoadError(true);
+                      }}
+                    />
+                    <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-lg">
+                      <span className="material-symbols-outlined text-white text-[20px]">zoom_in</span>
+                    </div>
+                  </button>
                 ) : (
-                  <div className="w-16 h-20 rounded-lg bg-[#dee8ff] border border-white flex flex-col items-center justify-center text-[#747780]">
-                    <span className="material-symbols-outlined text-[28px]">person</span>
-                    <span className="text-[8px] uppercase">Photo</span>
+                  <div className="w-20 h-24 sm:w-24 sm:h-28 rounded-lg bg-[#dee8ff] border-2 border-white flex flex-col items-center justify-center text-[#0051d5] shadow-xs p-1 text-center">
+                    <span className="material-symbols-outlined text-[32px] text-[#0051d5]">account_box</span>
+                    <span className="text-[9px] uppercase font-bold tracking-wider mt-0.5">Verified</span>
+                    <span className="text-[7.5px] text-[#44464f] uppercase">Profile</span>
                   </div>
                 )}
-                <div className="absolute -bottom-1 -right-1 bg-[#0051d5] text-white rounded-full p-0.5 flex items-center justify-center shadow-xs">
+                <div className="absolute -bottom-1 -right-1 bg-[#0051d5] text-white rounded-full p-1 flex items-center justify-center shadow-md">
                   <span className="material-symbols-outlined text-[12px]">verified</span>
                 </div>
               </div>
@@ -803,7 +829,7 @@ export const VerifyStudentScreen: React.FC<VerifyStudentScreenProps> = ({
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[520px] overflow-y-auto pr-1">
-                {currentApplications.map((app) => {
+                {currentApplications.map((app: AdmissionApplication) => {
                   const hasPhoto = Boolean(app.photoUrl);
                   const hasId = Boolean(app.idProofUrl);
                   const hasMarksheet = Boolean(app.marksheetUrl);

@@ -25,6 +25,23 @@ import {
 import { getAppsScriptUrl } from '../services/admissionService';
 import { COURSES_DATA } from '../data/coursesData';
 import { printAdmissionRecord, printBranchWiseReport } from '../utils/printReport';
+import {
+  fetchBranchesFromCentralDb,
+  saveBranchToCentralDb,
+  deleteBranchFromCentralDb,
+  subscribeToBranches,
+  fetchAdmissionsFromCentralDb,
+  updateAdmissionInCentralDb,
+  deleteAdmissionFromCentralDb,
+  migrateExistingDataToSupabase,
+} from '../services/centralDbService';
+import {
+  getStoredSupabaseConfig,
+  isSupabaseConfigured,
+  saveSupabaseConfig,
+} from '../services/supabaseClient';
+import { DashboardStats } from './DashboardStats';
+export { DashboardStats };
 
 interface AdminPanelProps {
   onBackToPortal?: () => void;
@@ -47,13 +64,35 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
   const [applications, setApplications] = useState<AdmissionApplication[]>([]);
   const [students, setStudents] = useState<StudentRecord[]>([]);
 
-  // Refresh trigger
-  const refreshData = () => {
+  // Refresh trigger (Queries Central Database directly)
+  const refreshData = async () => {
+    // 1. Initial quick load from local cache
     setBranches(getStoredBranches());
     setApplications(getStoredApplications());
     setStudents(getStoredStudents());
 
-    // Also synchronize from server database
+    // 2. Authoritative load from Central Database
+    try {
+      const centralBranches = await fetchBranchesFromCentralDb();
+      if (centralBranches && centralBranches.length > 0) {
+        setBranches(centralBranches);
+        setStoredBranches(centralBranches);
+      }
+    } catch (e) {
+      console.warn('Central branches fetch note:', e);
+    }
+
+    try {
+      const centralAdmissions = await fetchAdmissionsFromCentralDb();
+      if (centralAdmissions && centralAdmissions.length > 0) {
+        setApplications(centralAdmissions);
+        setStoredApplications(centralAdmissions);
+      }
+    } catch (e) {
+      console.warn('Central admissions fetch note:', e);
+    }
+
+    // Also sync from server API if active
     fetch('/api/branches')
       .then((r) => r.json())
       .then((res) => {
@@ -87,6 +126,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
 
   useEffect(() => {
     refreshData();
+
+    // Realtime live subscription to Supabase public.branches
+    const unsubscribe = subscribeToBranches((updatedBranches) => {
+      if (updatedBranches && updatedBranches.length > 0) {
+        setBranches(updatedBranches);
+        setStoredBranches(updatedBranches);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
   }, []);
 
   // Filter States for Admission List
@@ -100,9 +151,34 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
   const [editingApp, setEditingApp] = useState<AdmissionApplication | null>(null);
   const [deletingAppId, setDeletingAppId] = useState<string | null>(null);
 
+  // Dedicated useEffect hook to refresh the branch list from Supabase upon successful creation of a new branch
+  useEffect(() => {
+    if (!lastCreatedBranchId) return;
+
+    let isMounted = true;
+    const fetchLatestBranches = async () => {
+      try {
+        const freshBranches = await fetchBranchesFromCentralDb();
+        if (isMounted && freshBranches && freshBranches.length > 0) {
+          setBranches(freshBranches);
+          setStoredBranches(freshBranches);
+        }
+      } catch (err) {
+        console.warn('Error refreshing branches from Supabase after branch creation:', err);
+      }
+    };
+
+    fetchLatestBranches();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [lastCreatedBranchId]);
+
   // Branch Modal States
   const [isAddBranchOpen, setIsAddBranchOpen] = useState<boolean>(false);
   const [editingBranch, setEditingBranch] = useState<Branch | null>(null);
+  const [lastCreatedBranchId, setLastCreatedBranchId] = useState<string | null>(null);
   const [branchForm, setBranchForm] = useState({
     id: '',
     name: '',
@@ -382,75 +458,67 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
     setIsAddBranchOpen(true);
   };
 
-  const handleSaveBranch = (e: React.FormEvent) => {
+  const handleSaveBranch = async (e: React.FormEvent) => {
     e.preventDefault();
     setBranchActionMessage(null);
 
+    const branchToSave: Branch = editingBranch
+      ? {
+          ...editingBranch,
+          name: branchForm.name,
+          code: branchForm.code,
+          address: branchForm.address,
+          phone: branchForm.phone,
+          email: branchForm.email,
+          status: branchForm.status,
+        }
+      : {
+          id: `branch-${branchForm.code.toLowerCase()}-${Date.now().toString().slice(-4)}`,
+          name: branchForm.name,
+          code: branchForm.code,
+          address: branchForm.address,
+          phone: branchForm.phone,
+          email: branchForm.email,
+          status: branchForm.status,
+          isDefault: false,
+          createdAt: new Date().toISOString(),
+        };
+
+    // Save to Central Database
+    await saveBranchToCentralDb(branchToSave);
+
     if (editingBranch) {
-      // Update
-      const res = updateBranch({
-        ...editingBranch,
-        name: branchForm.name,
-        code: branchForm.code,
-        address: branchForm.address,
-        phone: branchForm.phone,
-        email: branchForm.email,
-        status: branchForm.status,
-      });
-      fetch(`/api/branches/${editingBranch.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(branchForm),
-      }).catch((e) => console.warn('Branch API sync note:', e));
-
-      if (res.success) {
-        showToast(res.message);
-        setIsAddBranchOpen(false);
-        refreshData();
-      } else {
-        setBranchActionMessage({ text: res.message, isError: true });
-      }
+      updateBranch(branchToSave);
     } else {
-      // Create
-      const res = createBranch({
-        name: branchForm.name,
-        code: branchForm.code,
-        address: branchForm.address,
-        phone: branchForm.phone,
-        email: branchForm.email,
-        status: branchForm.status,
-      });
-      fetch('/api/branches', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(branchForm),
-      }).catch((e) => console.warn('Branch API sync note:', e));
-
-      if (res.success) {
-        showToast(res.message);
-        setIsAddBranchOpen(false);
-        refreshData();
-      } else {
-        setBranchActionMessage({ text: res.message, isError: true });
-      }
+      createBranch(branchToSave);
+      setLastCreatedBranchId(branchToSave.id);
     }
+
+    fetch(`/api/branches/${branchToSave.id}`, {
+      method: editingBranch ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(branchToSave),
+    }).catch((e) => console.warn('Branch API sync note:', e));
+
+    showToast(editingBranch ? 'Branch updated successfully in Central Database!' : 'Branch created successfully in Central Database!');
+    setIsAddBranchOpen(false);
+    refreshData();
   };
 
-  const handleToggleStatus = (branch: Branch) => {
+  const handleToggleStatus = async (branch: Branch) => {
     if (branch.isDefault) {
       alert('The Main Branch must always remain Active.');
       return;
     }
-    const res = toggleBranchStatus(branch.id);
-    if (res.success) {
-      showToast(res.message);
-      refreshData();
-    } else {
-      alert(res.message);
-    }
+    const newStatus: 'Active' | 'Inactive' = branch.status === 'Active' ? 'Inactive' : 'Active';
+    const updated = { ...branch, status: newStatus };
+    await saveBranchToCentralDb(updated);
+    toggleBranchStatus(branch.id);
+    showToast(`Branch "${branch.name}" status updated to ${newStatus}.`);
+    refreshData();
   };
 
-  const handleDeleteBranch = (branch: Branch) => {
+  const handleDeleteBranch = async (branch: Branch) => {
     if (branch.isDefault) {
       alert('The Main Branch is the institutional anchor and cannot be deleted.');
       return;
@@ -463,19 +531,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
       return;
     }
     if (confirm(`Are you sure you want to permanently delete the branch "${branch.name}"?`)) {
-      const res = deleteBranch(branch.id, count);
+      await deleteBranchFromCentralDb(branch.id);
+      deleteBranch(branch.id, count);
       fetch(`/api/branches/${branch.id}`, { method: 'DELETE' }).catch((e) => console.warn('Branch delete API note:', e));
-      if (res.success) {
-        showToast(res.message);
-        refreshData();
-      } else {
-        alert(res.message);
-      }
+      showToast(`Branch "${branch.name}" deleted successfully.`);
+      refreshData();
     }
   };
 
   // Edit Admission Save Handler
-  const handleSaveAdmissionEdit = (e: React.FormEvent) => {
+  const handleSaveAdmissionEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingApp) return;
 
@@ -493,7 +558,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
     const finalBranchName = branchObj?.name || editingApp.branchName || 'Main Branch';
     const finalBranchCode = branchObj?.code || editingApp.branchCode || 'MAIN';
 
-    const res = updateAdmissionRecord(editingApp.id, {
+    const updates = {
       studentName: editingApp.studentName,
       guardianName: editingApp.guardianName,
       phone: editingApp.phone,
@@ -510,7 +575,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
       admissionDate: editingApp.admissionDate,
       utrNumber: editingApp.utrNumber,
       status: editingApp.status,
-    });
+    };
+
+    // Save to Central Database
+    await updateAdmissionInCentralDb(editingApp.id, updates);
+
+    // Sync local state
+    updateAdmissionRecord(editingApp.id, updates);
 
     fetch(`/api/admissions/${editingApp.id}`, {
       method: 'PUT',
@@ -523,27 +594,25 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
       }),
     }).catch((e) => console.warn('Admission update API note:', e));
 
-    if (res.success) {
-      showToast(res.message);
-      setEditingApp(null);
-      refreshData();
-    } else {
-      alert(res.message);
-    }
+    showToast('Admission record successfully updated in Central Database!');
+    setEditingApp(null);
+    refreshData();
   };
 
   // Delete Admission Handler
-  const confirmDeleteAdmission = () => {
+  const confirmDeleteAdmission = async () => {
     if (!deletingAppId) return;
-    const res = deleteAdmissionRecord(deletingAppId);
+
+    // Delete from Central Database
+    await deleteAdmissionFromCentralDb(deletingAppId);
+
+    // Sync local state
+    deleteAdmissionRecord(deletingAppId);
     fetch(`/api/admissions/${deletingAppId}`, { method: 'DELETE' }).catch((e) => console.warn('Admission delete API note:', e));
-    if (res.success) {
-      showToast(res.message);
-      setDeletingAppId(null);
-      refreshData();
-    } else {
-      alert(res.message);
-    }
+
+    showToast('Admission record deleted from Central Database.');
+    setDeletingAppId(null);
+    refreshData();
   };
 
   // Comprehensive CSV Export for Admissions Roster & Branch Reports (Authorized Admin Only)
@@ -551,6 +620,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
     const headers = [
       'Institutional Enrollment Number',
       'Application Reference ID',
+      'Branch ID',
+      'Branch Code',
+      'Branch Name',
       'Student Name',
       'Father / Mother / Guardian Name',
       'Date of Birth',
@@ -561,8 +633,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
       'Course / Program',
       'Educational Qualification',
       'Allotted Batch / Shift',
-      'Study Centre / Branch Name',
-      'Branch Code',
       'Date of Admission',
       'Certificate Serial Number',
       'Roll Number',
@@ -585,6 +655,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
 
     records.forEach((a) => {
       const bObj = branches.find((b) => b.id === a.branchId || b.code === a.branchCode);
+      const bId = a.branchId || bObj?.id || 'branch-main';
       const bName = a.branchName || bObj?.name || 'Main Branch';
       const bCode = a.branchCode || bObj?.code || 'MAIN';
       const enrollmentNo = String(a.enrollmentId || a.id || '').trim();
@@ -598,6 +669,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
       const row = [
         escapeCell(enrollmentNo),
         escapeCell(a.id),
+        escapeCell(bId),
+        escapeCell(bCode),
+        escapeCell(bName),
         escapeCell(a.studentName),
         escapeCell(a.guardianName),
         escapeCell(a.dob || ''),
@@ -608,8 +682,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
         escapeCell(a.course),
         escapeCell(a.qualification || ''),
         escapeCell(a.batch || ''),
-        escapeCell(bName),
-        escapeCell(bCode),
         escapeCell(admDate),
         escapeCell(certSerial),
         escapeCell(rollNo),
@@ -1054,6 +1126,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
               </div>
             </div>
           </div>
+
+          {/* D3 Central Visualizer: Admissions by Course (Last 30 Days from Supabase) */}
+          <DashboardStats
+            onCourseClick={(courseCode) => {
+              setSelectedCourseFilter(courseCode);
+              setActiveTab('admissions');
+            }}
+          />
 
           {/* Individual Branch Breakdown Cards */}
           <div className="flex flex-col gap-3">
@@ -1774,6 +1854,59 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
                 </button>
               </div>
             </form>
+          </div>
+
+          {/* Supabase Central Database Status & Schema Migration */}
+          <div className="p-5 rounded-2xl bg-white border border-[#dee8ff] shadow-xs flex flex-col gap-4">
+            <div className="flex items-center gap-2">
+              <span className="w-10 h-10 rounded-xl bg-blue-50 text-[#0051d5] flex items-center justify-center">
+                <span className="material-symbols-outlined text-[24px]">database</span>
+              </span>
+              <div>
+                <h3 className="font-headline text-base font-bold text-[#00163d]">
+                  Supabase PostgreSQL Central Database & Schema Status
+                </h3>
+                <p className="text-xs text-[#747780]">
+                  Authoritative multi-device cloud database for admissions, branches, and verification.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#f0f3ff] border border-[#dee8ff] flex flex-col gap-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`w-3 h-3 rounded-full ${
+                      isSupabaseConfigured() ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
+                    }`}
+                  />
+                  <strong className="text-[#00163d]">
+                    Status: {isSupabaseConfigured() ? 'Connected via Environment Variables' : 'Not Connected / Missing Keys'}
+                  </strong>
+                </div>
+                <span className="font-mono text-[11px] text-[#747780]">
+                  Required table: public.admissions
+                </span>
+              </div>
+
+              <div className="text-[11px] text-[#44464f] leading-relaxed">
+                If admissions fail with <code className="bg-red-50 text-red-700 px-1 py-0.5 rounded font-mono">ERROR 42P01: relation &quot;public.admissions&quot; does not exist</code>, initialize your Supabase PostgreSQL tables using the migration script:
+              </div>
+
+              <div className="p-3 bg-white rounded-lg border border-[#dee8ff] flex flex-col gap-2">
+                <span className="font-bold text-[#00163d] flex items-center gap-1 text-[11px]">
+                  <span className="material-symbols-outlined text-[16px] text-[#0051d5]">terminal</span>
+                  Migration Instructions (One-time Setup):
+                </span>
+                <ol className="list-decimal list-inside space-y-1 text-[11px] text-[#44464f]">
+                  <li>Open your project at <strong>https://supabase.com/dashboard</strong></li>
+                  <li>Go to <strong>SQL Editor</strong> &rarr; Click <strong>New Query</strong></li>
+                  <li>Copy all contents from file <code className="font-mono text-[#0051d5] bg-blue-50 px-1 py-0.5 rounded">supabase/schema.sql</code></li>
+                  <li>Paste into SQL Editor and click <strong>Run</strong></li>
+                  <li>All tables (<code className="font-mono">public.admissions</code>, <code className="font-mono">public.branches</code>, sequences, RPCs, and RLS policies) will be created instantly</li>
+                </ol>
+              </div>
+            </div>
           </div>
         </div>
       )}

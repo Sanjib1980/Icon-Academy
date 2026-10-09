@@ -1,11 +1,73 @@
 import React, { useState, useEffect } from 'react';
+import { z } from 'zod';
 import { TabType, AdmissionApplication, StudentRecord, Branch } from '../types';
-import { peekNextEnrollmentNumber, updateAdmissionRecord } from '../data/studentsData';
+import { supabase, isSupabaseConfigured, uploadToStorage, STORAGE_BUCKET_DOCUMENTS } from '../lib/supabaseClient';
+import {
+  generateCentralEnrollmentNumber,
+  submitAdmissionToCentralDb,
+  updateAdmissionInCentralDb,
+  fetchBranchesFromCentralDb,
+  subscribeToBranches,
+} from '../services/centralDbService';
 import { submitAdmissionToServer } from '../services/admissionService';
 import { getActiveBranches, getBranchById, DEFAULT_MAIN_BRANCH, setStoredBranches } from '../data/branchesData';
 import { PaymentQrCode } from './PaymentQrCode';
 import { printAdmissionRecord } from '../utils/printReport';
 import { OfficialAdmissionSlipModal } from './OfficialAdmissionSlipModal';
+
+/**
+ * Client-Side Zod Validation Schemas for IAIT Admission Form
+ * Strictly validates student and payment data before initiating network transactions to Supabase PostgreSQL.
+ */
+export const admissionBaseValidationSchema = z.object({
+  studentName: z
+    .string()
+    .trim()
+    .min(2, "Validation Error: Please enter Student's Full Name in Step 1 (minimum 2 characters)."),
+  phone: z
+    .string()
+    .transform((val) => (val || '').replace(/[^0-9]/g, ''))
+    .refine((val) => val.length >= 10, {
+      message: 'Validation Error: Please enter a valid 10-digit Active Mobile Number in Step 1.',
+    }),
+  email: z
+    .string()
+    .trim()
+    .refine((val) => !val || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val), {
+      message: 'Validation Error: Please enter a valid Email Address in Step 1.',
+    })
+    .optional(),
+  guardianName: z.string().trim().optional(),
+  course: z
+    .string()
+    .trim()
+    .min(1, 'Validation Error: Please select an Academic Course in Step 2.'),
+  branchId: z
+    .string()
+    .trim()
+    .min(1, 'Validation Error: Please select an active Institutional Branch / Study Centre.'),
+  branchName: z.string().optional(),
+  branchCode: z.string().optional(),
+  dob: z.string().optional(),
+  gender: z.string().optional(),
+  qualification: z.string().optional(),
+  batch: z.string().optional(),
+  address: z.string().optional(),
+  admissionDate: z.string().optional(),
+});
+
+export const admissionPaymentValidationSchema = z.object({
+  utrNumber: z
+    .string()
+    .trim()
+    .min(4, 'Validation Error: Please enter your 12-digit UTR or Transaction Reference number in Step 4 below.'),
+  hasReceipt: z.boolean().refine((val) => val === true, {
+    message: 'Validation Error: Uploading payment receipt / snapshot is mandatory. Please upload your payment screenshot in Step 4 below.',
+  }),
+  declaration: z.boolean().refine((val) => val === true, {
+    message: 'Validation Error: Please accept the institutional legal declaration checkbox in Step 4 before final submission.',
+  }),
+});
 
 interface AdmissionScreenProps {
   preselectedCourse?: string;
@@ -42,25 +104,73 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
   });
 
   useEffect(() => {
-    // 1. Initial local load
-    const branches = getActiveBranches();
-    if (branches && branches.length > 0) {
-      setActiveBranches(branches);
-    }
-
-    // 2. Fetch latest active branches from database server
-    fetch('/api/branches')
-      .then((r) => r.json())
-      .then((res) => {
-        if (res && res.success && Array.isArray(res.branches) && res.branches.length > 0) {
-          setStoredBranches(res.branches);
-          const active = res.branches.filter((b: Branch) => b.status === 'Active');
+    // Helper to refresh branches from Supabase Central DB
+    const loadLiveBranches = async () => {
+      try {
+        const liveBranches = await fetchBranchesFromCentralDb();
+        if (liveBranches && liveBranches.length > 0) {
+          setStoredBranches(liveBranches);
+          const active = liveBranches.filter((b: Branch) => b.status === 'Active');
           if (active.length > 0) {
             setActiveBranches(active);
+            // If current selected branch is not in active list, select default or first
+            setFormData((prev) => {
+              const currentExists = active.some((b) => b.id === prev.branchId);
+              if (!currentExists) {
+                const defaultB = active.find((b) => b.isDefault) || active[0];
+                return {
+                  ...prev,
+                  branchId: defaultB.id,
+                  branchName: defaultB.name,
+                  branchCode: defaultB.code,
+                };
+              }
+              return prev;
+            });
           }
         }
-      })
-      .catch((e) => console.warn('Could not fetch server branches:', e));
+      } catch (err) {
+        console.warn('Central DB live branches load note:', err);
+      }
+    };
+
+    // 1. Initial immediate load from Supabase / Central DB
+    loadLiveBranches();
+
+    // 2. Subscribe to realtime changes from Supabase public.branches and local dispatch events
+    const unsubscribe = subscribeToBranches((updated) => {
+      if (updated && updated.length > 0) {
+        setStoredBranches(updated);
+        const active = updated.filter((b: Branch) => b.status === 'Active');
+        if (active.length > 0) {
+          setActiveBranches(active);
+          setFormData((prev) => {
+            const currentExists = active.some((b) => b.id === prev.branchId);
+            if (!currentExists) {
+              const defaultB = active.find((b) => b.isDefault) || active[0];
+              return {
+                ...prev,
+                branchId: defaultB.id,
+                branchName: defaultB.name,
+                branchCode: defaultB.code,
+              };
+            }
+            return prev;
+          });
+        }
+      }
+    });
+
+    // 3. Fallback sync on window focus (e.g. user created branch in another tab)
+    const handleFocus = () => {
+      loadLiveBranches();
+    };
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('focus', handleFocus);
+    };
   }, []);
 
   const [confirmedRecord, setConfirmedRecord] = useState<AdmissionApplication | null>(null);
@@ -87,13 +197,14 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [isApplicationSaved, setIsApplicationSaved] = useState<boolean>(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [savedTimestamp, setSavedTimestamp] = useState<string | null>(null);
 
   const admissionYear = formData.admissionDate
     ? new Date(formData.admissionDate).getFullYear()
     : new Date().getFullYear();
   const effectiveYear = isNaN(admissionYear) ? new Date().getFullYear() : admissionYear;
   const yy = effectiveYear.toString().slice(-2);
-  const nextAssignedEnrollmentId = peekNextEnrollmentNumber(effectiveYear);
 
   useEffect(() => {
     if (preselectedCourse) {
@@ -227,7 +338,15 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
     setSubmissionError(null);
     setValidationNotice(null);
 
-    // 1. FORM VALIDATION
+    // 1. Explicit Network Connectivity Check
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setSaveStatus('error');
+      setSubmissionError('Network Error: Your device appears to be offline. Please verify your internet connection and try again.');
+      window.scrollTo({ top: 150, behavior: 'smooth' });
+      return;
+    }
+
+    // 2. FORM VALIDATION
     // Resolve branch carefully - prioritize user's chosen branchId, then branchCode, then branchName
     let selectedBranch = activeBranches.find((b) => b.id === formData.branchId) || getBranchById(formData.branchId);
     if (!selectedBranch && formData.branchCode) {
@@ -267,45 +386,55 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
       }));
     }
 
-    // Check Student Name
-    if (!formData.studentName || !formData.studentName.trim()) {
-      setValidationNotice("Validation Error: Please enter Student's Full Name in Step 1.");
-      setStep(1);
-      window.scrollTo({ top: 160, behavior: 'smooth' });
+    // 1. CLIENT-SIDE ZOD SCHEMA VALIDATION BEFORE ATTEMPTING SUPABASE TRANSACTION
+    const baseValidation = admissionBaseValidationSchema.safeParse({
+      studentName: formData.studentName,
+      phone: formData.phone,
+      email: formData.email,
+      guardianName: formData.guardianName,
+      course: formData.course,
+      branchId: selectedBranch.id,
+      branchName: selectedBranch.name,
+      branchCode: selectedBranch.code,
+      dob: formData.dob,
+      gender: formData.gender,
+      qualification: formData.qualification,
+      batch: formData.batch,
+      address: formData.address,
+      admissionDate: formData.admissionDate,
+    });
+
+    if (!baseValidation.success) {
+      const firstIssue = baseValidation.error.issues[0];
+      const field = String(firstIssue.path[0] || '');
+      if (['studentName', 'phone', 'email', 'guardianName', 'dob', 'gender', 'address'].includes(field)) {
+        setStep(1);
+        window.scrollTo({ top: field === 'phone' ? 220 : 160, behavior: 'smooth' });
+      } else if (['course', 'qualification', 'batch'].includes(field)) {
+        setStep(2);
+        window.scrollTo({ top: 160, behavior: 'smooth' });
+      }
+      setValidationNotice(firstIssue.message);
       return;
     }
 
-    // Check Phone (10-digit)
-    const cleanPhone = formData.phone.replace(/[^0-9]/g, '');
-    if (!cleanPhone || cleanPhone.length < 10) {
-      setValidationNotice('Validation Error: Please enter a valid 10-digit Active Mobile Number in Step 1.');
-      setStep(1);
-      window.scrollTo({ top: 220, behavior: 'smooth' });
-      return;
-    }
-
-    // Check Course
-    if (!formData.course) {
-      setValidationNotice('Validation Error: Please select an Academic Course in Step 2.');
-      setStep(2);
-      window.scrollTo({ top: 160, behavior: 'smooth' });
-      return;
-    }
-
-    // If finalizing with payment (Step 4)
+    // If finalizing with payment (Step 4), validate payment requirements with Zod
     if (targetStage === 'complete_with_payment') {
-      if (!formData.utrNumber || !formData.utrNumber.trim()) {
-        setValidationNotice('Validation Error: Please enter your 12-digit UTR or Transaction Reference number in Step 4 below.');
-        window.scrollTo({ top: 380, behavior: 'smooth' });
-        return;
-      }
-      if (!receiptDataUrl && !receiptName) {
-        setValidationNotice('Validation Error: Uploading payment receipt / snapshot is mandatory. Please upload your payment screenshot in Step 4 below.');
-        window.scrollTo({ top: 430, behavior: 'smooth' });
-        return;
-      }
-      if (!formData.declaration) {
-        setValidationNotice('Validation Error: Please accept the institutional legal declaration checkbox in Step 4 before final submission.');
+      const paymentValidation = admissionPaymentValidationSchema.safeParse({
+        utrNumber: formData.utrNumber,
+        hasReceipt: Boolean(receiptDataUrl || receiptName),
+        declaration: formData.declaration,
+      });
+
+      if (!paymentValidation.success) {
+        const firstIssue = paymentValidation.error.issues[0];
+        const field = String(firstIssue.path[0] || '');
+        setValidationNotice(firstIssue.message);
+        if (field === 'utrNumber') {
+          window.scrollTo({ top: 380, behavior: 'smooth' });
+        } else if (field === 'hasReceipt') {
+          window.scrollTo({ top: 430, behavior: 'smooth' });
+        }
         return;
       }
     }
@@ -313,6 +442,7 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
     // 2. PREVENT DUPLICATE SUBMISSION
     if (isSubmitting) return;
     setIsSubmitting(true);
+    setSaveStatus('saving');
 
     try {
       console.log(`[AdmissionScreen] Processing admission submission (stage: ${targetStage})...`);
@@ -322,48 +452,103 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
         : new Date().getFullYear();
       const effectiveYear = isNaN(admissionYear) ? new Date().getFullYear() : admissionYear;
 
-      // If application was already saved to database previously, update with payment details
+      // If application was already saved to database previously, update with payment details in admissions table
       if (isApplicationSaved && generatedAppId) {
-        console.log(`[AdmissionScreen] Updating previously saved application ${generatedAppId} with UTR and receipt...`);
-        const updateRes = updateAdmissionRecord(generatedAppId, {
-          utrNumber: formData.utrNumber.trim(),
-          receiptName: receiptName || 'payment_receipt.jpg',
-          receiptUrl: receiptDataUrl,
-          status: 'Approved',
-        });
+        console.log(`[AdmissionScreen] Updating previously saved application ${generatedAppId} (${generatedEnrollmentId}) with UTR and receipt in Supabase...`);
 
-        // Background sync to server API
+        let cloudReceiptUrl = receiptDataUrl;
+        if (receiptDataUrl && receiptDataUrl.startsWith('data:') && isSupabaseConfigured()) {
+          try {
+            const { publicUrl } = await uploadToStorage(
+              STORAGE_BUCKET_DOCUMENTS,
+              `receipts/${Date.now()}_${receiptName || 'payment_receipt.jpg'}`,
+              receiptDataUrl,
+              'image/jpeg'
+            );
+            if (publicUrl) cloudReceiptUrl = publicUrl;
+          } catch (uploadErr) {
+            console.warn('[AdmissionScreen] Storage upload note for receipt:', uploadErr);
+          }
+        }
+
+        // 1. Direct database update to Supabase public.admissions table
+        if (isSupabaseConfigured()) {
+          const updatePayload: any = {
+            utr_number: formData.utrNumber.trim(),
+            payment_status: 'completed',
+            payment_date: new Date().toISOString(),
+            payment_receipt_url: cloudReceiptUrl,
+            application_status: 'Approved',
+            updated_at: new Date().toISOString(),
+          };
+
+          const { error: updateAdmErr } = await supabase
+            .from('admissions')
+            .update(updatePayload)
+            .or(`enrollment_number.eq.${generatedEnrollmentId || generatedAppId},application_number.eq.${generatedAppId}`);
+
+          if (updateAdmErr) {
+            console.error('[AdmissionScreen] Supabase admissions update notice:', updateAdmErr.message);
+            const code = (updateAdmErr as any).code || '';
+            const msg = updateAdmErr.message || '';
+            if (code === '42P01' || msg.includes('does not exist') || msg.includes('public.admissions')) {
+              throw new Error(
+                'Supabase Database Error (42P01): Table "public.admissions" does not exist in your Supabase project. Please execute the SQL migration in "supabase/schema.sql" via your Supabase Project Dashboard -> SQL Editor.'
+              );
+            }
+            throw new Error(`Supabase Update Error (${code || 'FAILED'}): ${msg}`);
+          } else {
+            console.log(`[AdmissionScreen] Confirmed update in Supabase public.admissions: ${generatedEnrollmentId}`);
+          }
+        }
+
+        // 2. Synchronize with backend API route
         fetch(`/api/admissions/${generatedAppId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             utrNumber: formData.utrNumber.trim(),
             receiptName: receiptName || 'payment_receipt.jpg',
-            receiptUrl: receiptDataUrl,
+            receiptUrl: cloudReceiptUrl,
             status: 'Approved',
           }),
         }).catch((e) => console.warn('[AdmissionScreen] API update note:', e));
 
-        if (updateRes.success) {
-          setIsSuccessModalOpen(true);
-          setIsSubmitting(false);
-          return;
+        if (confirmedRecord) {
+          setConfirmedRecord({
+            ...confirmedRecord,
+            utrNumber: formData.utrNumber.trim(),
+            utr_number: formData.utrNumber.trim(),
+            receiptName: receiptName || 'payment_receipt.jpg',
+            receiptUrl: cloudReceiptUrl,
+            payment_receipt_url: cloudReceiptUrl,
+            payment_status: 'completed',
+            status: 'Approved',
+          });
         }
+        setSaveStatus('saved');
+        setSavedTimestamp(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+        setIsSuccessModalOpen(true);
+        setIsSubmitting(false);
+        return;
       }
 
-      // 3. GENERATE ENROLLMENT NUMBER & 4. SAVE ADMISSION TO DATABASE
-      const result = await submitAdmissionToServer({
+      // 3. SUBMIT TO CENTRAL DATABASE (public.admissions) WITH SERVER-SIDE ENROLLMENT
+      const result = await submitAdmissionToCentralDb({
         branchId: selectedBranch.id,
         branchName: selectedBranch.name,
         branchCode: selectedBranch.code,
         studentName: formData.studentName.trim(),
         guardianName: formData.guardianName.trim() || 'Guardian',
+        fatherName: formData.guardianName.trim() || 'Guardian',
         dob: formData.dob || '2005-01-01',
         gender: formData.gender,
+        category: 'General',
         phone: formData.phone.trim(),
         email: formData.email.trim() || `${formData.studentName.toLowerCase().replace(/\s+/g, '')}@gmail.com`,
         address: formData.address.trim() || 'Assam, India',
         course: formData.course,
+        courseCode: formData.course,
         qualification: formData.qualification,
         batch: formData.batch,
         admissionDate: formData.admissionDate,
@@ -378,12 +563,13 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
         receiptUrl: receiptDataUrl,
       }, { admissionYear: effectiveYear });
 
-      // 9. DATABASE CONFIRMATION
       if (!result || !result.success || !result.enrollmentNumber || !result.applicationId) {
-        throw new Error(result?.error || 'Database did not return a valid enrollment confirmation.');
+        throw new Error((result as any)?.error || 'Unable to save admission to central database. Please verify connection.');
       }
 
-      console.log(`[AdmissionScreen] Confirmed database save: ${result.applicationId} with Enrollment ${result.enrollmentNumber}`);
+      console.log(`[AdmissionScreen] Confirmed central admission save: ${result.applicationId} with Enrollment ${result.enrollmentNumber}`);
+      setSaveStatus('saved');
+      setSavedTimestamp(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       setGeneratedAppId(result.applicationId);
       setGeneratedEnrollmentId(result.enrollmentNumber);
       if (result.admission) {
@@ -391,19 +577,29 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
       }
       setIsApplicationSaved(true);
 
-      // 7. CONTINUE TO PAYMENT STEP OR SUCCESS
+      // 4. ADVANCE TO PAYMENT OR OPEN SUCCESS CONFIRMATION MODAL
       if (targetStage === 'application_only') {
-        // Advance to Step 4 (Payment)
         setStep(4);
         window.scrollTo({ top: 150, behavior: 'smooth' });
       } else {
-        // Complete & show success
         setIsSuccessModalOpen(true);
       }
     } catch (err: any) {
       console.error('[AdmissionScreen] Admission submission error:', err);
-      const errMsg = err?.message || 'Admission submission failed. Please check form details and try again.';
-      setSubmissionError(errMsg);
+      setSaveStatus('error');
+      const rawMsg = err?.message || 'Admission submission failed. Please check form details and try again.';
+      let userFriendlyError = rawMsg;
+      const lower = rawMsg.toLowerCase();
+      if (
+        lower.includes('failed to fetch') ||
+        lower.includes('networkerror') ||
+        lower.includes('network error') ||
+        lower.includes('timeout') ||
+        lower.includes('err_connection')
+      ) {
+        userFriendlyError = `Network / Connection Error: Unable to communicate with the Supabase central database. Please check your internet connection and verify that your Supabase project is reachable. (${rawMsg})`;
+      }
+      setSubmissionError(userFriendlyError);
       window.scrollTo({ top: 150, behavior: 'smooth' });
     } finally {
       setIsSubmitting(false);
@@ -448,6 +644,51 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
     } else {
       await handleAdmissionSubmission('complete_with_payment');
     }
+  };
+
+  const resetFormForNewAdmission = () => {
+    setFormData({
+      branchId: DEFAULT_MAIN_BRANCH.id,
+      branchName: DEFAULT_MAIN_BRANCH.name,
+      branchCode: DEFAULT_MAIN_BRANCH.code,
+      studentName: '',
+      guardianName: '',
+      dob: '',
+      gender: 'Male',
+      phone: '',
+      email: '',
+      address: '',
+      course: preselectedCourse || 'ADCA',
+      qualification: '10+2 (HS Passed)',
+      batch: 'Morning Shift',
+      admissionDate: new Date().toISOString().split('T')[0],
+      utrNumber: '',
+      declaration: false,
+    });
+    setPhotoFileName('');
+    setIdProofName('');
+    setIdProofDataUrl('');
+    setMarksheetName('');
+    setMarksheetDataUrl('');
+    setReceiptName('');
+    setReceiptDataUrl('');
+    setGeneratedAppId('');
+    setGeneratedEnrollmentId('');
+    setConfirmedRecord(null);
+    setIsApplicationSaved(false);
+    setSaveStatus('idle');
+    setSavedTimestamp(null);
+    setValidationNotice(null);
+    setSubmissionError(null);
+    setStep(1);
+    setIsSuccessModalOpen(false);
+    setIsSlipModalOpen(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleCloseSlipModal = () => {
+    // Closes slip preview and returns to Admission page while keeping Supabase record intact
+    setIsSlipModalOpen(false);
   };
 
   const handleCloseSuccess = () => {
@@ -648,21 +889,40 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
               )}
 
               {submissionError && (
-                <div className="p-3.5 rounded-xl bg-red-50 border-2 border-red-300 text-red-900 text-xs flex items-start gap-2.5 shadow-sm animate-in fade-in">
-                  <span className="material-symbols-outlined text-red-600 text-[20px] shrink-0 mt-0.5">
-                    error
-                  </span>
-                  <div className="flex-1">
-                    <strong className="font-bold block text-sm mb-0.5">Submission Notice:</strong>
-                    <span>{submissionError}</span>
+                <div className="p-4 rounded-xl bg-red-50 border-2 border-red-400 text-red-950 text-xs flex flex-col gap-2 shadow-sm animate-in fade-in">
+                  <div className="flex items-start justify-between gap-2.5">
+                    <div className="flex items-start gap-2.5">
+                      <span className="material-symbols-outlined text-red-600 text-[22px] shrink-0 mt-0.5">
+                        error
+                      </span>
+                      <div>
+                        <strong className="font-bold block text-sm mb-0.5">Database / Submission Error:</strong>
+                        <span className="font-mono text-[11px] leading-relaxed break-words">{submissionError}</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSubmissionError(null)}
+                      className="text-red-700 hover:text-red-950 p-1 cursor-pointer shrink-0"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">close</span>
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setSubmissionError(null)}
-                    className="text-red-700 hover:text-red-950 p-1 cursor-pointer"
-                  >
-                    <span className="material-symbols-outlined text-[16px]">close</span>
-                  </button>
+                  {(submissionError.includes('42P01') || submissionError.includes('schema.sql') || submissionError.includes('public.admissions')) && (
+                    <div className="mt-1 p-3 rounded-lg bg-white border border-red-200 text-gray-800 text-xs flex flex-col gap-1.5">
+                      <span className="font-bold text-red-700 flex items-center gap-1">
+                        <span className="material-symbols-outlined text-[16px]">database</span>
+                        Action Required in Supabase Dashboard:
+                      </span>
+                      <ol className="list-decimal list-inside space-y-1 text-[11px] text-gray-700">
+                        <li>Open your project at <strong>supabase.com/dashboard</strong></li>
+                        <li>Click <strong>SQL Editor</strong> on the left navigation bar</li>
+                        <li>Copy the contents of <strong>supabase/schema.sql</strong> and paste them into the query editor</li>
+                        <li>Click <strong>Run</strong> (Ctrl+Enter) to create table <code>public.admissions</code>, indexes, and RLS policies</li>
+                        <li>Return here and submit the admission form again</li>
+                      </ol>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1619,27 +1879,64 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
                 </div>
               )}
 
-              <button
-                type="submit"
-                onClick={(e) => {
-                  e.preventDefault();
-                  handleAdmissionSubmission('complete_with_payment');
-                }}
-                disabled={isSubmitting}
-                className="w-full bg-[#0051d5] hover:bg-[#316bf3] disabled:opacity-60 disabled:cursor-not-allowed text-white text-base font-bold py-4 px-6 rounded-xl shadow-lg flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer"
-              >
-                {isSubmitting ? (
-                  <>
-                    <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>Processing Admission & Payment... Please wait</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="material-symbols-outlined text-[24px]">verified</span>
-                    <span>Submit Admission Application & Pay</span>
-                  </>
-                )}
-              </button>
+              {/* Post-Save Confirmation / Duplicate Prevention Banner in Step 4 */}
+              {saveStatus === 'saved' && generatedEnrollmentId ? (
+                <div className="p-4 rounded-xl bg-emerald-50 border-2 border-emerald-400 text-emerald-950 flex flex-col gap-3 shadow-sm animate-in fade-in">
+                  <div className="flex items-center gap-2.5">
+                    <span className="material-symbols-outlined text-emerald-600 text-[26px]">task_alt</span>
+                    <div>
+                      <h4 className="font-bold text-sm text-[#00163d]">Admission Successfully Logged!</h4>
+                      <p className="text-xs text-emerald-800">
+                        Enrollment Number: <strong className="font-mono text-emerald-950 text-sm font-black">{generatedEnrollmentId}</strong>
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const recordToPrint = getPrintableRecord();
+                        setCurrentRecordForSlip(recordToPrint);
+                        setIsSlipModalOpen(true);
+                      }}
+                      className="flex-1 bg-[#0051d5] hover:bg-[#316bf3] text-white text-xs font-bold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 shadow-sm transition-all cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">print</span>
+                      <span>View / Print Admission Slip</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={resetFormForNewAdmission}
+                      className="bg-white hover:bg-slate-100 text-[#00163d] border border-slate-300 text-xs font-bold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">person_add</span>
+                      <span>Submit Another Student</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="submit"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    handleAdmissionSubmission('complete_with_payment');
+                  }}
+                  disabled={isSubmitting || saveStatus === 'saved'}
+                  className="w-full bg-[#0051d5] hover:bg-[#316bf3] disabled:opacity-60 disabled:cursor-not-allowed text-white text-base font-bold py-4 px-6 rounded-xl shadow-lg flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Processing Admission & Payment... Please wait</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="material-symbols-outlined text-[24px]">verified</span>
+                      <span>Submit Admission Application & Pay</span>
+                    </>
+                  )}
+                </button>
+              )}
               <div className="flex items-center justify-center gap-1.5 text-center text-[#747780] text-[11px]">
                 <span className="material-symbols-outlined text-[14px]">lock</span>
                 <span>Encrypted 256-bit transmission to IAIT Central Registrar Registry</span>
@@ -1800,9 +2097,18 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
               <button
                 type="button"
                 onClick={() => setIsSuccessModalOpen(false)}
-                className="w-full bg-slate-100 hover:bg-slate-200 text-[#44464f] text-xs font-semibold py-2.5 rounded-xl transition-all cursor-pointer"
+                className="w-full bg-slate-100 hover:bg-slate-200 text-[#00163d] text-xs font-bold py-2.5 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 border border-slate-300"
               >
-                Close Notice
+                <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+                <span>← Back to Admission</span>
+              </button>
+              <button
+                type="button"
+                onClick={resetFormForNewAdmission}
+                className="w-full bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold py-2.5 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <span className="material-symbols-outlined text-[16px]">person_add</span>
+                <span>Submit Another Student Admission</span>
               </button>
             </div>
           </div>
@@ -1813,7 +2119,7 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
       {currentRecordForSlip && (
         <OfficialAdmissionSlipModal
           isOpen={isSlipModalOpen}
-          onClose={() => setIsSlipModalOpen(false)}
+          onClose={handleCloseSlipModal}
           record={currentRecordForSlip}
           branch={activeBranches.find((b) => b.id === currentRecordForSlip.branchId) || getBranchById(currentRecordForSlip.branchId)}
         />
