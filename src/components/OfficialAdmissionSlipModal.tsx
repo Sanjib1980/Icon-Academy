@@ -46,14 +46,12 @@ export const OfficialAdmissionSlipModal: React.FC<OfficialAdmissionSlipModalProp
   const sessionStr = isNaN(year) ? 'Session 2025-2026' : `Session ${year}-${year + 1}`;
   const rollNo = `${record.course}-${enrollment.length >= 4 ? enrollment.slice(-4) : enrollment}`;
 
+  const paymentStatus = record.payment_status || (record.status === 'Approved' ? 'Completed' : 'Pending Verification');
+  const isPending = paymentStatus.toLowerCase().includes('pending');
+
   const handlePrint = () => {
-    // 1. First attempt direct window.print() if card is mounted in DOM
-    try {
-      window.print();
-    } catch {
-      // 2. Fallback to printAdmissionRecord
-      printAdmissionRecord(record, branch);
-    }
+    // Print using clean isolated iframe without navigation, buttons or modal overlay
+    printAdmissionRecord(record, branch);
   };
 
   const handleDownloadPdf = async () => {
@@ -155,8 +153,12 @@ export const OfficialAdmissionSlipModal: React.FC<OfficialAdmissionSlipModalProp
                 </div>
               </div>
               <div className="text-right shrink-0">
-                <span className="inline-block border-2 border-emerald-600 text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded text-[9.5px] font-extrabold uppercase">
-                  ✓ VERIFIED ADMISSION
+                <span className={`inline-block border-2 ${
+                  isPending
+                    ? 'border-amber-600 text-amber-700 bg-amber-50'
+                    : 'border-emerald-600 text-emerald-700 bg-emerald-50'
+                } px-2 py-0.5 rounded text-[9px] font-extrabold uppercase`}>
+                  {isPending ? '⏳ PENDING VERIFICATION' : '✓ VERIFIED ADMISSION'}
                 </span>
                 <div className="text-[9px] text-[#64748b] mt-1">Issue Date: {new Date().toLocaleDateString('en-GB')}</div>
                 <div className="text-[9.5px] text-[#0051d5] font-bold mt-0.5">{sessionStr}</div>
@@ -300,21 +302,29 @@ export const OfficialAdmissionSlipModal: React.FC<OfficialAdmissionSlipModalProp
               <div className="text-[9.5px] font-extrabold text-[#475569] uppercase tracking-wider border-b border-slate-200 pb-1 mb-2">
                 3. Admission Confirmation & Fee Payment Record
               </div>
-              <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                 <div className="bg-[#f8fafc] border border-slate-200 p-2 rounded">
                   <span className="text-[8.5px] font-bold text-[#64748b] uppercase block">Date of Admission</span>
                   <span className="text-[11.5px] font-bold text-[#0f172a] block">{admDate}</span>
                 </div>
                 <div className="bg-[#f8fafc] border border-slate-200 p-2 rounded">
-                  <span className="text-[8.5px] font-bold text-[#64748b] uppercase block">Payment / UTR Reference</span>
-                  <span className="text-[11.5px] font-bold font-mono text-emerald-700 block truncate">
-                    {record.utrNumber || 'VERIFIED'}
+                  <span className="text-[8.5px] font-bold text-[#64748b] uppercase block">Registration Fee</span>
+                  <span className="text-[12px] font-extrabold text-[#00163d] block">
+                    ₹500.00 <span className="text-[9px] font-normal text-slate-500">(Online)</span>
                   </span>
                 </div>
                 <div className="bg-[#f8fafc] border border-slate-200 p-2 rounded">
-                  <span className="text-[8.5px] font-bold text-[#64748b] uppercase block">Admission Status</span>
-                  <span className="text-[11.5px] font-extrabold text-emerald-700 block">
-                    {record.status || 'Approved'} • Active Student
+                  <span className="text-[8.5px] font-bold text-[#64748b] uppercase block">UTR / Transaction Ref</span>
+                  <span className="text-[11.5px] font-bold font-mono text-[#0051d5] block truncate">
+                    {record.utrNumber || 'N/A'}
+                  </span>
+                </div>
+                <div className="bg-[#f8fafc] border border-slate-200 p-2 rounded">
+                  <span className="text-[8.5px] font-bold text-[#64748b] uppercase block">Payment Status</span>
+                  <span className={`text-[11px] font-extrabold block ${
+                    isPending ? 'text-amber-700' : 'text-emerald-700'
+                  }`}>
+                    {paymentStatus}
                   </span>
                 </div>
               </div>

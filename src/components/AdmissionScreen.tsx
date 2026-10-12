@@ -334,7 +334,65 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
     );
   };
 
-  const handleAdmissionSubmission = async (targetStage: 'application_only' | 'complete_with_payment') => {
+  // Step Validation Helpers
+  const validateStep1 = (): boolean => {
+    setValidationNotice(null);
+    if (!formData.branchId) {
+      setValidationNotice('Validation Error: Please select an Admission Branch to continue.');
+      window.scrollTo({ top: 150, behavior: 'smooth' });
+      return false;
+    }
+    if (!formData.studentName.trim()) {
+      setValidationNotice("Validation Error: Please enter Student's Full Name in Step 1.");
+      window.scrollTo({ top: 200, behavior: 'smooth' });
+      return false;
+    }
+    const cleanPhone = formData.phone.replace(/[^0-9]/g, '');
+    if (!cleanPhone || cleanPhone.length < 10) {
+      setValidationNotice('Validation Error: Please enter a valid 10-digit Active Mobile Number in Step 1.');
+      window.scrollTo({ top: 300, behavior: 'smooth' });
+      return false;
+    }
+    return true;
+  };
+
+  const validateStep2 = (): boolean => {
+    setValidationNotice(null);
+    if (!formData.course) {
+      setValidationNotice('Validation Error: Please select an Academic Course in Step 2.');
+      window.scrollTo({ top: 150, behavior: 'smooth' });
+      return false;
+    }
+    return true;
+  };
+
+  const validateStep3 = (): boolean => {
+    setValidationNotice(null);
+    if (!idProofDataUrl && !idProofName) {
+      setValidationNotice('Validation Error: Please upload Government ID Proof (Aadhaar / Voter ID / PAN) in Step 3 before proceeding.');
+      window.scrollTo({ top: 360, behavior: 'smooth' });
+      return false;
+    }
+    if (!marksheetDataUrl && !marksheetName) {
+      setValidationNotice('Validation Error: Please upload your Academic Marksheet in Step 3 before proceeding.');
+      window.scrollTo({ top: 480, behavior: 'smooth' });
+      return false;
+    }
+    return true;
+  };
+
+  // Payment Validation Status (Mandatory for Step 4 Final Submission)
+  const isUtrEntered = Boolean(formData.utrNumber && formData.utrNumber.trim().length >= 4);
+  const isReceiptUploaded = Boolean(receiptDataUrl || receiptName);
+  const isDeclarationAccepted = Boolean(formData.declaration);
+  const isPaymentValid = isUtrEntered && isReceiptUploaded && isDeclarationAccepted;
+
+  /**
+   * Final Submission to Central Database (Step 4)
+   * Strictly verifies payment details before saving.
+   * Does NOT treat entered details as confirmed payment; uses "Pending Verification".
+   */
+  const handleFinalAdmissionSubmission = async () => {
     setSubmissionError(null);
     setValidationNotice(null);
 
@@ -346,8 +404,49 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
       return;
     }
 
-    // 2. FORM VALIDATION
-    // Resolve branch carefully - prioritize user's chosen branchId, then branchCode, then branchName
+    // 2. Validate Step 1 (Personal Details)
+    if (!validateStep1()) {
+      setStep(1);
+      return;
+    }
+
+    // 3. Validate Step 2 (Academic Track)
+    if (!validateStep2()) {
+      setStep(2);
+      return;
+    }
+
+    // 4. Validate Step 3 (Uploads)
+    if (!validateStep3()) {
+      setStep(3);
+      return;
+    }
+
+    // 5. Validate Step 4 (Payment Details - Mandatory Validation)
+    const paymentValidation = admissionPaymentValidationSchema.safeParse({
+      utrNumber: formData.utrNumber,
+      hasReceipt: Boolean(receiptDataUrl || receiptName),
+      declaration: formData.declaration,
+    });
+
+    if (!paymentValidation.success) {
+      const firstIssue = paymentValidation.error.issues[0];
+      setValidationNotice(firstIssue.message);
+      const field = String(firstIssue.path[0] || '');
+      if (field === 'utrNumber') {
+        window.scrollTo({ top: 380, behavior: 'smooth' });
+      } else if (field === 'hasReceipt') {
+        window.scrollTo({ top: 430, behavior: 'smooth' });
+      }
+      return;
+    }
+
+    // 6. Prevent Duplicate Submissions
+    if (isSubmitting || saveStatus === 'saved') return;
+    setIsSubmitting(true);
+    setSaveStatus('saving');
+
+    // Resolve target branch
     let selectedBranch = activeBranches.find((b) => b.id === formData.branchId) || getBranchById(formData.branchId);
     if (!selectedBranch && formData.branchCode) {
       selectedBranch = activeBranches.find((b) => b.code.toUpperCase() === formData.branchCode.toUpperCase()) || getBranchById(formData.branchCode);
@@ -356,213 +455,51 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
       selectedBranch = activeBranches.find((b) => b.name.toLowerCase() === formData.branchName.toLowerCase()) || getBranchById(formData.branchName);
     }
     if (!selectedBranch) {
-      if (formData.branchName && formData.branchCode) {
-        selectedBranch = {
-          id: formData.branchId || `branch-${formData.branchCode.toLowerCase()}`,
-          name: formData.branchName,
-          code: formData.branchCode,
-          address: '',
-          phone: '',
-          email: '',
-          status: 'Active',
-          createdAt: new Date().toISOString(),
-        };
-      } else {
-        selectedBranch = activeBranches.find((b) => b.isDefault) || activeBranches[0] || DEFAULT_MAIN_BRANCH;
-      }
+      selectedBranch = activeBranches.find((b) => b.isDefault) || activeBranches[0] || DEFAULT_MAIN_BRANCH;
     }
-
-    // Keep form state in sync with resolved branch
-    if (
-      formData.branchId !== selectedBranch.id ||
-      formData.branchName !== selectedBranch.name ||
-      formData.branchCode !== selectedBranch.code
-    ) {
-      setFormData((prev) => ({
-        ...prev,
-        branchId: selectedBranch.id,
-        branchName: selectedBranch.name,
-        branchCode: selectedBranch.code,
-      }));
-    }
-
-    // 1. CLIENT-SIDE ZOD SCHEMA VALIDATION BEFORE ATTEMPTING SUPABASE TRANSACTION
-    const baseValidation = admissionBaseValidationSchema.safeParse({
-      studentName: formData.studentName,
-      phone: formData.phone,
-      email: formData.email,
-      guardianName: formData.guardianName,
-      course: formData.course,
-      branchId: selectedBranch.id,
-      branchName: selectedBranch.name,
-      branchCode: selectedBranch.code,
-      dob: formData.dob,
-      gender: formData.gender,
-      qualification: formData.qualification,
-      batch: formData.batch,
-      address: formData.address,
-      admissionDate: formData.admissionDate,
-    });
-
-    if (!baseValidation.success) {
-      const firstIssue = baseValidation.error.issues[0];
-      const field = String(firstIssue.path[0] || '');
-      if (['studentName', 'phone', 'email', 'guardianName', 'dob', 'gender', 'address'].includes(field)) {
-        setStep(1);
-        window.scrollTo({ top: field === 'phone' ? 220 : 160, behavior: 'smooth' });
-      } else if (['course', 'qualification', 'batch'].includes(field)) {
-        setStep(2);
-        window.scrollTo({ top: 160, behavior: 'smooth' });
-      }
-      setValidationNotice(firstIssue.message);
-      return;
-    }
-
-    // If finalizing with payment (Step 4), validate payment requirements with Zod
-    if (targetStage === 'complete_with_payment') {
-      const paymentValidation = admissionPaymentValidationSchema.safeParse({
-        utrNumber: formData.utrNumber,
-        hasReceipt: Boolean(receiptDataUrl || receiptName),
-        declaration: formData.declaration,
-      });
-
-      if (!paymentValidation.success) {
-        const firstIssue = paymentValidation.error.issues[0];
-        const field = String(firstIssue.path[0] || '');
-        setValidationNotice(firstIssue.message);
-        if (field === 'utrNumber') {
-          window.scrollTo({ top: 380, behavior: 'smooth' });
-        } else if (field === 'hasReceipt') {
-          window.scrollTo({ top: 430, behavior: 'smooth' });
-        }
-        return;
-      }
-    }
-
-    // 2. PREVENT DUPLICATE SUBMISSION
-    if (isSubmitting) return;
-    setIsSubmitting(true);
-    setSaveStatus('saving');
 
     try {
-      console.log(`[AdmissionScreen] Processing admission submission (stage: ${targetStage})...`);
-      // Determine target enrollment year
+      console.log('[AdmissionScreen] Submitting complete admission with verified payment details to Supabase Central DB...');
       const admissionYear = formData.admissionDate
         ? new Date(formData.admissionDate).getFullYear()
         : new Date().getFullYear();
       const effectiveYear = isNaN(admissionYear) ? new Date().getFullYear() : admissionYear;
 
-      // If application was already saved to database previously, update with payment details in admissions table
-      if (isApplicationSaved && generatedAppId) {
-        console.log(`[AdmissionScreen] Updating previously saved application ${generatedAppId} (${generatedEnrollmentId}) with UTR and receipt in Supabase...`);
+      // SUBMIT TO CENTRAL DATABASE (public.admissions) WITH CENTRAL SEQUENTIAL ENROLLMENT NUMBER
+      const result = await submitAdmissionToCentralDb(
+        {
+          branchId: selectedBranch.id,
+          branchName: selectedBranch.name,
+          branchCode: selectedBranch.code,
+          studentName: formData.studentName.trim(),
+          guardianName: formData.guardianName.trim() || 'Guardian',
+          fatherName: formData.guardianName.trim() || 'Guardian',
+          dob: formData.dob || '2005-01-01',
+          gender: formData.gender,
+          category: 'General',
+          phone: formData.phone.trim(),
+          email: formData.email.trim() || `${formData.studentName.toLowerCase().replace(/\s+/g, '')}@gmail.com`,
+          address: formData.address.trim() || 'Assam, India',
+          course: formData.course,
+          courseCode: formData.course,
+          qualification: formData.qualification,
+          batch: formData.batch,
+          admissionDate: formData.admissionDate,
+          photoUrl: photoPreview,
+          photoName: photoFileName || 'candidate_photo.jpg',
+          idProofName: idProofName || 'id_proof.jpg',
+          idProofUrl: idProofDataUrl,
+          marksheetName: marksheetName || 'hslc_marksheet.jpg',
+          marksheetUrl: marksheetDataUrl,
+          utrNumber: formData.utrNumber.trim(),
+          receiptName: receiptName || 'payment_receipt.jpg',
+          receiptUrl: receiptDataUrl,
+          paymentMethod: payTab === 'upi' ? 'UPI / Online' : 'Bank Transfer / NEFT',
+        },
+        { admissionYear: effectiveYear }
+      );
 
-        let cloudReceiptUrl = receiptDataUrl;
-        if (receiptDataUrl && receiptDataUrl.startsWith('data:') && isSupabaseConfigured()) {
-          try {
-            const { publicUrl } = await uploadToStorage(
-              STORAGE_BUCKET_DOCUMENTS,
-              `receipts/${Date.now()}_${receiptName || 'payment_receipt.jpg'}`,
-              receiptDataUrl,
-              'image/jpeg'
-            );
-            if (publicUrl) cloudReceiptUrl = publicUrl;
-          } catch (uploadErr) {
-            console.warn('[AdmissionScreen] Storage upload note for receipt:', uploadErr);
-          }
-        }
-
-        // 1. Direct database update to Supabase public.admissions table
-        if (isSupabaseConfigured()) {
-          const updatePayload: any = {
-            utr_number: formData.utrNumber.trim(),
-            payment_status: 'completed',
-            payment_date: new Date().toISOString(),
-            payment_receipt_url: cloudReceiptUrl,
-            application_status: 'Approved',
-            updated_at: new Date().toISOString(),
-          };
-
-          const { error: updateAdmErr } = await supabase
-            .from('admissions')
-            .update(updatePayload)
-            .or(`enrollment_number.eq.${generatedEnrollmentId || generatedAppId},application_number.eq.${generatedAppId}`);
-
-          if (updateAdmErr) {
-            console.error('[AdmissionScreen] Supabase admissions update notice:', updateAdmErr.message);
-            const code = (updateAdmErr as any).code || '';
-            const msg = updateAdmErr.message || '';
-            if (code === '42P01' || msg.includes('does not exist') || msg.includes('public.admissions')) {
-              throw new Error(
-                'Supabase Database Error (42P01): Table "public.admissions" does not exist in your Supabase project. Please execute the SQL migration in "supabase/schema.sql" via your Supabase Project Dashboard -> SQL Editor.'
-              );
-            }
-            throw new Error(`Supabase Update Error (${code || 'FAILED'}): ${msg}`);
-          } else {
-            console.log(`[AdmissionScreen] Confirmed update in Supabase public.admissions: ${generatedEnrollmentId}`);
-          }
-        }
-
-        // 2. Synchronize with backend API route
-        fetch(`/api/admissions/${generatedAppId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            utrNumber: formData.utrNumber.trim(),
-            receiptName: receiptName || 'payment_receipt.jpg',
-            receiptUrl: cloudReceiptUrl,
-            status: 'Approved',
-          }),
-        }).catch((e) => console.warn('[AdmissionScreen] API update note:', e));
-
-        if (confirmedRecord) {
-          setConfirmedRecord({
-            ...confirmedRecord,
-            utrNumber: formData.utrNumber.trim(),
-            utr_number: formData.utrNumber.trim(),
-            receiptName: receiptName || 'payment_receipt.jpg',
-            receiptUrl: cloudReceiptUrl,
-            payment_receipt_url: cloudReceiptUrl,
-            payment_status: 'completed',
-            status: 'Approved',
-          });
-        }
-        setSaveStatus('saved');
-        setSavedTimestamp(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-        setIsSuccessModalOpen(true);
-        setIsSubmitting(false);
-        return;
-      }
-
-      // 3. SUBMIT TO CENTRAL DATABASE (public.admissions) WITH SERVER-SIDE ENROLLMENT
-      const result = await submitAdmissionToCentralDb({
-        branchId: selectedBranch.id,
-        branchName: selectedBranch.name,
-        branchCode: selectedBranch.code,
-        studentName: formData.studentName.trim(),
-        guardianName: formData.guardianName.trim() || 'Guardian',
-        fatherName: formData.guardianName.trim() || 'Guardian',
-        dob: formData.dob || '2005-01-01',
-        gender: formData.gender,
-        category: 'General',
-        phone: formData.phone.trim(),
-        email: formData.email.trim() || `${formData.studentName.toLowerCase().replace(/\s+/g, '')}@gmail.com`,
-        address: formData.address.trim() || 'Assam, India',
-        course: formData.course,
-        courseCode: formData.course,
-        qualification: formData.qualification,
-        batch: formData.batch,
-        admissionDate: formData.admissionDate,
-        photoUrl: photoPreview,
-        photoName: photoFileName || 'candidate_photo.jpg',
-        idProofName: idProofName || 'id_proof.jpg',
-        idProofUrl: idProofDataUrl,
-        marksheetName: marksheetName || 'hslc_marksheet.jpg',
-        marksheetUrl: marksheetDataUrl,
-        utrNumber: formData.utrNumber.trim() || 'SUBMITTED_PRE_PAYMENT',
-        receiptName: receiptName || 'payment_receipt.jpg',
-        receiptUrl: receiptDataUrl,
-      }, { admissionYear: effectiveYear });
-
+      // Show success ONLY after the database confirms saving
       if (!result || !result.success || !result.enrollmentNumber || !result.applicationId) {
         throw new Error((result as any)?.error || 'Unable to save admission to central database. Please verify connection.');
       }
@@ -572,18 +509,34 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
       setSavedTimestamp(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       setGeneratedAppId(result.applicationId);
       setGeneratedEnrollmentId(result.enrollmentNumber);
-      if (result.admission) {
-        setConfirmedRecord(result.admission);
-      }
+      
+      const confirmedAdm: AdmissionApplication = {
+        ...(result.admission || {}),
+        id: result.applicationId,
+        enrollmentId: result.enrollmentNumber,
+        enrollment_number: result.enrollmentNumber,
+        studentName: formData.studentName.trim(),
+        guardianName: formData.guardianName.trim() || 'Guardian',
+        course: formData.course,
+        branchId: selectedBranch.id,
+        branchName: selectedBranch.name,
+        branchCode: selectedBranch.code,
+        admissionDate: formData.admissionDate,
+        utrNumber: formData.utrNumber.trim(),
+        payment_status: 'Pending Verification',
+        application_status: 'Pending Verification',
+        status: 'Pending Verification',
+        registration_fee: 500.00,
+        payment_method: payTab === 'upi' ? 'UPI / Online' : 'Bank Transfer / NEFT',
+        photoUrl: photoPreview,
+        receiptUrl: receiptDataUrl,
+        receiptName: receiptName,
+        createdAt: new Date().toISOString(),
+      };
+      setConfirmedRecord(confirmedAdm);
+      setCurrentRecordForSlip(confirmedAdm);
       setIsApplicationSaved(true);
-
-      // 4. ADVANCE TO PAYMENT OR OPEN SUCCESS CONFIRMATION MODAL
-      if (targetStage === 'application_only') {
-        setStep(4);
-        window.scrollTo({ top: 150, behavior: 'smooth' });
-      } else {
-        setIsSuccessModalOpen(true);
-      }
+      setIsSuccessModalOpen(true);
     } catch (err: any) {
       console.error('[AdmissionScreen] Admission submission error:', err);
       setSaveStatus('error');
@@ -611,8 +564,8 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
     const bId = formData.branchId;
     const bObj = activeBranches.find((b) => b.id === bId) || getBranchById(bId);
     return {
-      id: generatedAppId,
-      enrollmentId: generatedEnrollmentId,
+      id: generatedAppId || 'PENDING',
+      enrollmentId: generatedEnrollmentId || 'PENDING',
       studentName: formData.studentName,
       guardianName: formData.guardianName,
       dob: formData.dob,
@@ -628,21 +581,29 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
       branchName: formData.branchName || bObj?.name || 'Main Branch',
       branchCode: formData.branchCode || bObj?.code || 'MAIN',
       utrNumber: formData.utrNumber,
+      payment_status: 'Pending Verification',
+      application_status: 'Pending Verification',
+      status: 'Pending Verification',
+      registration_fee: 500.00,
+      payment_method: payTab === 'upi' ? 'UPI / Online' : 'Bank Transfer / NEFT',
       photoUrl: photoPreview,
       photoName: photoFileName || 'candidate_photo.jpg',
       receiptUrl: receiptDataUrl,
       receiptName: receiptName,
-      status: 'Approved',
       createdAt: new Date().toISOString(),
     };
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (step < 4) {
-      await handleAdmissionSubmission('application_only');
-    } else {
-      await handleAdmissionSubmission('complete_with_payment');
+    if (step === 1) {
+      if (validateStep1()) setStep(2);
+    } else if (step === 2) {
+      if (validateStep2()) setStep(3);
+    } else if (step === 3) {
+      if (validateStep3()) setStep(4);
+    } else if (step === 4) {
+      await handleFinalAdmissionSubmission();
     }
   };
 
@@ -1555,10 +1516,10 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
               />
             </div>
 
-            {/* Helper guidance note above submit */}
+            {/* Helper guidance note above proceed */}
             <div className="p-2.5 rounded-xl bg-blue-50/70 border border-blue-100 text-[11px] text-[#003ea8] flex items-center gap-2">
               <span className="material-symbols-outlined text-[16px] shrink-0 text-[#0051d5]">info</span>
-              <span>Clicking submit will save your admission in the database with <strong>{formData.branchName || activeBranches.find((b) => b.id === formData.branchId)?.name || 'Main Branch'}</strong> and proceed to fee payment.</span>
+              <span>Please upload your Government ID and Marksheet (.jpg or .jpeg only, max 200 KB) before proceeding to Fee Payment.</span>
             </div>
 
             {/* Navigation Buttons */}
@@ -1573,21 +1534,16 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => handleAdmissionSubmission('application_only')}
-                disabled={isSubmitting}
-                className="w-2/3 bg-[#0051d5] hover:bg-[#316bf3] disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-bold py-3.5 rounded-xl shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer"
+                onClick={() => {
+                  if (validateStep3()) {
+                    setStep(4);
+                    window.scrollTo({ top: 150, behavior: 'smooth' });
+                  }
+                }}
+                className="w-2/3 bg-[#0051d5] hover:bg-[#316bf3] text-white text-xs font-bold py-3.5 rounded-xl shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer"
               >
-                {isSubmitting ? (
-                  <>
-                    <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>Saving to Database... Please wait</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="material-symbols-outlined text-[18px]">verified</span>
-                    <span>Submit Admission Application & Pay</span>
-                  </>
-                )}
+                <span>Proceed to Fee Payment</span>
+                <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
               </button>
             </div>
           </div>
@@ -1879,6 +1835,33 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
                 </div>
               )}
 
+              {/* Mandatory Payment Checklist Warning if payment is incomplete */}
+              {!isPaymentValid && saveStatus !== 'saved' && (
+                <div className="p-3.5 rounded-xl bg-amber-50/90 border-2 border-amber-300 text-amber-950 text-xs flex items-start gap-2.5 shadow-xs animate-in fade-in">
+                  <span className="material-symbols-outlined text-amber-600 text-[20px] shrink-0 mt-0.5">lock_clock</span>
+                  <div className="flex-1">
+                    <strong className="font-bold block text-amber-900 mb-0.5">Mandatory Payment Verification Checklist</strong>
+                    <p className="text-[11px] text-amber-800 mb-1.5">
+                      Final Submission is disabled until all required payment fields are completed and validated:
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 text-[11px]">
+                      <span className={`inline-flex items-center gap-1 font-semibold ${isUtrEntered ? 'text-emerald-700' : 'text-red-600'}`}>
+                        <span className="material-symbols-outlined text-[15px]">{isUtrEntered ? 'check_circle' : 'cancel'}</span>
+                        12-Digit UTR Ref
+                      </span>
+                      <span className={`inline-flex items-center gap-1 font-semibold ${isReceiptUploaded ? 'text-emerald-700' : 'text-red-600'}`}>
+                        <span className="material-symbols-outlined text-[15px]">{isReceiptUploaded ? 'check_circle' : 'cancel'}</span>
+                        Payment Receipt
+                      </span>
+                      <span className={`inline-flex items-center gap-1 font-semibold ${isDeclarationAccepted ? 'text-emerald-700' : 'text-red-600'}`}>
+                        <span className="material-symbols-outlined text-[15px]">{isDeclarationAccepted ? 'check_circle' : 'cancel'}</span>
+                        Declaration Check
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Post-Save Confirmation / Duplicate Prevention Banner in Step 4 */}
               {saveStatus === 'saved' && generatedEnrollmentId ? (
                 <div className="p-4 rounded-xl bg-emerald-50 border-2 border-emerald-400 text-emerald-950 flex flex-col gap-3 shadow-sm animate-in fade-in">
@@ -1887,7 +1870,7 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
                     <div>
                       <h4 className="font-bold text-sm text-[#00163d]">Admission Successfully Logged!</h4>
                       <p className="text-xs text-emerald-800">
-                        Enrollment Number: <strong className="font-mono text-emerald-950 text-sm font-black">{generatedEnrollmentId}</strong>
+                        Enrollment Number: <strong className="font-mono text-emerald-950 text-sm font-black">{generatedEnrollmentId}</strong> • Status: <strong className="text-amber-800">Pending Verification</strong>
                       </p>
                     </div>
                   </div>
@@ -1896,13 +1879,24 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
                       type="button"
                       onClick={() => {
                         const recordToPrint = getPrintableRecord();
-                        setCurrentRecordForSlip(recordToPrint);
-                        setIsSlipModalOpen(true);
+                        printAdmissionRecord(recordToPrint, activeBranches.find((b) => b.id === recordToPrint.branchId) || getBranchById(recordToPrint.branchId));
                       }}
                       className="flex-1 bg-[#0051d5] hover:bg-[#316bf3] text-white text-xs font-bold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 shadow-sm transition-all cursor-pointer"
                     >
                       <span className="material-symbols-outlined text-[16px]">print</span>
-                      <span>View / Print Admission Slip</span>
+                      <span>Print Admission Slip</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const recordToPrint = getPrintableRecord();
+                        setCurrentRecordForSlip(recordToPrint);
+                        setIsSlipModalOpen(true);
+                      }}
+                      className="bg-white hover:bg-slate-100 text-[#00163d] border border-slate-300 text-xs font-bold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">visibility</span>
+                      <span>Preview Slip</span>
                     </button>
                     <button
                       type="button"
@@ -1919,15 +1913,24 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
                   type="submit"
                   onClick={(e) => {
                     e.preventDefault();
-                    handleAdmissionSubmission('complete_with_payment');
+                    handleFinalAdmissionSubmission();
                   }}
-                  disabled={isSubmitting || saveStatus === 'saved'}
-                  className="w-full bg-[#0051d5] hover:bg-[#316bf3] disabled:opacity-60 disabled:cursor-not-allowed text-white text-base font-bold py-4 px-6 rounded-xl shadow-lg flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer"
+                  disabled={isSubmitting || saveStatus === 'saved' || !isPaymentValid}
+                  className={`w-full text-white text-base font-bold py-4 px-6 rounded-xl shadow-lg flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer ${
+                    !isPaymentValid
+                      ? 'bg-slate-400 hover:bg-slate-400 opacity-60 cursor-not-allowed shadow-none'
+                      : 'bg-[#0051d5] hover:bg-[#316bf3]'
+                  }`}
                 >
                   {isSubmitting ? (
                     <>
                       <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
                       <span>Processing Admission & Payment... Please wait</span>
+                    </>
+                  ) : !isPaymentValid ? (
+                    <>
+                      <span className="material-symbols-outlined text-[20px]">lock</span>
+                      <span>Complete Payment Details to Enable Final Submission</span>
                     </>
                   ) : (
                     <>
@@ -2055,8 +2058,18 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
                   <span className="font-medium text-[#111c2d]">{formData.admissionDate || new Date().toISOString().split('T')[0]}</span>
                 </div>
                 <div className="flex items-center justify-between">
+                  <span className="text-[#747780]">Registration Fee:</span>
+                  <strong className="text-[#00163d]">₹500.00 (Online)</strong>
+                </div>
+                <div className="flex items-center justify-between">
                   <span className="text-[#747780]">UTR Ref:</span>
-                  <span className="font-mono text-emerald-700 font-semibold">{formData.utrNumber}</span>
+                  <span className="font-mono text-[#0051d5] font-semibold">{formData.utrNumber}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#747780]">Payment Status:</span>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-bold">
+                    Pending Verification
+                  </span>
                 </div>
               </div>
             </div>
@@ -2066,13 +2079,12 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
                 type="button"
                 onClick={() => {
                   const recordToPrint = getPrintableRecord();
-                  setCurrentRecordForSlip(recordToPrint);
-                  setIsSlipModalOpen(true);
+                  printAdmissionRecord(recordToPrint, activeBranches.find((b) => b.id === recordToPrint.branchId) || getBranchById(recordToPrint.branchId));
                 }}
                 className="w-full bg-[#0051d5] hover:bg-[#316bf3] text-white text-xs font-bold py-3 px-4 rounded-xl shadow-md transition-all cursor-pointer flex items-center justify-center gap-2"
               >
                 <span className="material-symbols-outlined text-[18px]">print</span>
-                <span>Print Official Admission Slip / Card</span>
+                <span>Print Official Admission Slip</span>
               </button>
               <button
                 type="button"
@@ -2083,8 +2095,8 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
                 }}
                 className="w-full bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold py-3 px-4 rounded-xl shadow-sm transition-all cursor-pointer flex items-center justify-center gap-2"
               >
-                <span className="material-symbols-outlined text-[18px]">download_for_offline</span>
-                <span>Download Admission Slip (PDF)</span>
+                <span className="material-symbols-outlined text-[18px]">visibility</span>
+                <span>Preview & Download Slip (PDF)</span>
               </button>
               <button
                 type="button"

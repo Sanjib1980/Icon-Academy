@@ -137,6 +137,116 @@ export function printHtmlContent(title: string, htmlContent: string): void {
 }
 
 /**
+ * Convert modern OKLCH CSS color strings to standard RGB / RGBA strings.
+ * html2canvas 1.4.x does not support CSS Color Module 4 `oklch(...)`, which
+ * Tailwind CSS v4 generates by default.
+ */
+function convertOklchToRgb(str: string): string {
+  if (!str || typeof str !== 'string' || !str.includes('oklch')) {
+    return str;
+  }
+  return str.replace(/oklch\(\s*([\d.]+)%?\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+%?))?\s*\)/gi, (match, lStr, cStr, hStr, aStr) => {
+    try {
+      let L = parseFloat(lStr);
+      if (lStr.includes('%') || L > 1) L = L / 100;
+      const C = parseFloat(cStr);
+      const hDeg = parseFloat(hStr);
+      let alpha = 1;
+      if (aStr) {
+        alpha = aStr.includes('%') ? parseFloat(aStr) / 100 : parseFloat(aStr);
+      }
+      const hRad = (hDeg * Math.PI) / 180;
+      const a = C * Math.cos(hRad);
+      const b = C * Math.sin(hRad);
+
+      const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+      const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+      const s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+
+      const l = l_ * l_ * l_;
+      const m__ = m_ * m_ * m_;
+      const s = s_ * s_ * s_;
+
+      const r = +4.0767416621 * l - 3.3077115913 * m__ + 0.2309699292 * s;
+      const g = -1.2684380046 * l + 2.6097574011 * m__ - 0.3413193965 * s;
+      const b_val = -0.0041960863 * l - 0.7034186147 * m__ + 1.7076147010 * s;
+
+      const gamma = (x: number) => {
+        const clamped = Math.max(0, Math.min(1, x));
+        return clamped <= 0.0031308 ? 12.92 * clamped : 1.055 * Math.pow(clamped, 1 / 2.4) - 0.055;
+      };
+
+      const R = Math.round(gamma(r) * 255);
+      const G = Math.round(gamma(g) * 255);
+      const B = Math.round(gamma(b_val) * 255);
+
+      if (alpha < 1) {
+        return `rgba(${R}, ${G}, ${B}, ${alpha})`;
+      }
+      return `rgb(${R}, ${G}, ${B})`;
+    } catch {
+      return match;
+    }
+  });
+}
+
+/**
+ * Traverses a cloned DOM document and sanitizes all OKLCH colors
+ * in inline styles, computed styles, stylesheets, and style tags to compatible RGB.
+ */
+function sanitizeOklchInDocument(doc: Document): void {
+  try {
+    // 1. Sanitize text content inside <style> tags
+    const styleTags = Array.from(doc.querySelectorAll('style'));
+    for (const styleEl of styleTags) {
+      if (styleEl.textContent && styleEl.textContent.includes('oklch')) {
+        styleEl.textContent = convertOklchToRgb(styleEl.textContent);
+      }
+    }
+
+    // 2. Sanitize inline styles and computed color properties on all elements
+    const COLOR_PROPS = [
+      'color',
+      'backgroundColor',
+      'borderColor',
+      'borderTopColor',
+      'borderRightColor',
+      'borderBottomColor',
+      'borderLeftColor',
+      'outlineColor',
+      'fill',
+      'stroke',
+      'boxShadow',
+      'textShadow',
+    ];
+
+    const allElements = Array.from(doc.querySelectorAll('*'));
+    for (const el of allElements) {
+      const htmlEl = el as HTMLElement;
+
+      // Sanitize style attribute string if present
+      const inlineStyle = htmlEl.getAttribute('style');
+      if (inlineStyle && inlineStyle.includes('oklch')) {
+        htmlEl.setAttribute('style', convertOklchToRgb(inlineStyle));
+      }
+
+      // Convert computed styles that evaluate to oklch
+      const computed = doc.defaultView?.getComputedStyle(htmlEl) || window.getComputedStyle(htmlEl);
+      if (computed) {
+        for (const prop of COLOR_PROPS) {
+          const val = (computed as any)[prop];
+          if (typeof val === 'string' && val.includes('oklch')) {
+            (htmlEl.style as any)[prop] = convertOklchToRgb(val);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Note while sanitizing OKLCH in cloned doc:', err);
+  }
+}
+
+/**
  * Downloads a rendered DOM element as a crisp, print-ready PDF document.
  * 100% client-side, zero backend dependency, works on Vercel and in AI Studio preview.
  */
@@ -148,6 +258,10 @@ export async function downloadElementAsPdf(element: HTMLElement, filename: strin
       allowTaint: true,
       backgroundColor: '#ffffff',
       logging: false,
+      onclone: (clonedDoc) => {
+        // Intercept cloned DOM before rendering and convert all OKLCH colors to sRGB
+        sanitizeOklchInDocument(clonedDoc);
+      },
     });
 
     const imgData = canvas.toDataURL('image/jpeg', 0.95);
@@ -180,10 +294,23 @@ export function printAdmissionRecord(app: AdmissionApplication, branch?: Branch)
   const branchCode = app.branchCode || branch?.code || 'MAIN';
   const branchAddress = branch?.address || app.address || 'Assam Center, India';
   const branchPhone = branch?.phone || '8638611886';
-  const enrollment = app.enrollmentId || app.id;
+  const enrollment = app.enrollmentId || app.enrollment_number || app.id;
   const admDate = app.admissionDate || (app.createdAt ? app.createdAt.split('T')[0] : new Date().toISOString().split('T')[0]);
   const year = admDate ? new Date(admDate).getFullYear() : new Date().getFullYear();
   const sessionStr = isNaN(year) ? 'Session 2025-2026' : `Session ${year}-${year + 1}`;
+
+  const paymentStatus = app.payment_status || (app.status === 'Approved' ? 'Completed' : 'Pending Verification');
+  const isPending = paymentStatus.toLowerCase().includes('pending');
+  const paymentBadgeColor = isPending ? '#d97706' : '#059669';
+  const paymentBadgeBg = isPending ? '#fffbeb' : '#ecfdf5';
+
+  let photoSrc = app.photoUrl || app.photo_url || '';
+  if (photoSrc && !photoSrc.startsWith('http') && !photoSrc.startsWith('data:') && !photoSrc.startsWith('/')) {
+    if (photoSrc.startsWith('/9j/') || photoSrc.startsWith('iVBORw')) {
+      const mime = photoSrc.startsWith('iVBORw') ? 'image/png' : 'image/jpeg';
+      photoSrc = `data:${mime};base64,${photoSrc}`;
+    }
+  }
 
   const html = `
     <div class="dossier-card">
@@ -207,9 +334,9 @@ export function printAdmissionRecord(app: AdmissionApplication, branch?: Branch)
               Official Admission Slip / Confirmation Dossier
             </div>
           </td>
-          <td style="text-align: right; vertical-align: middle; width: 140px;">
-            <div class="verified-seal" style="display: inline-block; border: 2px solid #059669; color: #059669; padding: 3px 8px; border-radius: 4px; font-size: 9.5px; font-weight: 800; text-transform: uppercase;">
-              ✓ VERIFIED ADMISSION
+          <td style="text-align: right; vertical-align: middle; width: 145px;">
+            <div class="verified-seal" style="display: inline-block; border: 2px solid ${paymentBadgeColor}; color: ${paymentBadgeColor}; background: ${paymentBadgeBg}; padding: 3px 8px; border-radius: 4px; font-size: 9px; font-weight: 800; text-transform: uppercase;">
+              ${isPending ? '⏳ PENDING VERIFICATION' : '✓ VERIFIED ADMISSION'}
             </div>
             <div style="font-size: 9px; color: #64748b; margin-top: 4px;">
               Issue Date: ${new Date().toLocaleDateString('en-GB')}
@@ -309,8 +436,8 @@ export function printAdmissionRecord(app: AdmissionApplication, branch?: Branch)
         <!-- Student Photograph -->
         <div style="flex-shrink: 0; width: 105px; text-align: center;">
           ${
-            app.photoUrl
-              ? `<img src="${app.photoUrl}" style="width: 105px; height: 125px; object-fit: cover; border: 2px solid #00163d; border-radius: 4px; display: block;" alt="${app.studentName}" />`
+            photoSrc
+              ? `<img src="${photoSrc}" style="width: 105px; height: 125px; object-fit: cover; border: 2px solid #00163d; border-radius: 4px; display: block;" alt="${app.studentName}" />`
               : `<div style="width: 105px; height: 125px; border: 1.5px dashed #64748b; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #f8fafc; color: #64748b; font-size: 9.5px; padding: 4px;">
                   <span style="font-size: 26px;">👤</span>
                   <span style="margin-top: 2px; text-align: center;">Student Photo Affixed</span>
@@ -349,26 +476,32 @@ export function printAdmissionRecord(app: AdmissionApplication, branch?: Branch)
       <div class="section-heading" style="font-size: 9.5px; font-weight: 800; color: #475569; text-transform: uppercase; letter-spacing: 0.8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; margin-top: 6px; margin-bottom: 6px;">
         3. Admission Confirmation & Fee Payment Record
       </div>
-      <div class="data-grid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 12px; margin-bottom: 10px;">
+      <div class="data-grid" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px 10px; margin-bottom: 10px;">
         <div class="data-item">
           <span class="data-label" style="font-size: 8.5px; font-weight: 700; color: #64748b; text-transform: uppercase;">Date of Admission</span>
-          <span class="data-val" style="font-size: 12px; font-weight: 700; color: #0f172a;">${admDate}</span>
+          <span class="data-val" style="font-size: 11.5px; font-weight: 700; color: #0f172a;">${admDate}</span>
+        </div>
+        <div class="data-item">
+          <span class="data-label" style="font-size: 8.5px; font-weight: 700; color: #64748b; text-transform: uppercase;">Registration Fee</span>
+          <span class="data-val-bold" style="font-size: 12px; font-weight: 800; color: #00163d;">
+            ₹500.00 <span style="font-size: 9px; font-weight: 600; color: #64748b;">(Online)</span>
+          </span>
         </div>
         <div class="data-item">
           <span class="data-label" style="font-size: 8.5px; font-weight: 700; color: #64748b; text-transform: uppercase;">Payment / UTR Reference</span>
-          <span class="data-val" style="font-size: 12px; font-weight: 700; font-family: monospace; color: #047857;">${app.utrNumber || 'VERIFIED'}</span>
+          <span class="data-val" style="font-size: 11.5px; font-weight: 700; font-family: monospace; color: #0051d5;">${app.utrNumber || 'N/A'}</span>
         </div>
         <div class="data-item">
-          <span class="data-label" style="font-size: 8.5px; font-weight: 700; color: #64748b; text-transform: uppercase;">Admission Status</span>
-          <span class="data-val-bold" style="font-size: 12px; font-weight: 800; color: #047857;">
-            ${app.status || 'Approved'} • Active Student
+          <span class="data-label" style="font-size: 8.5px; font-weight: 700; color: #64748b; text-transform: uppercase;">Payment Status</span>
+          <span class="data-val-bold" style="font-size: 11.5px; font-weight: 800; color: ${paymentBadgeColor};">
+            ${paymentStatus}
           </span>
         </div>
       </div>
 
       <!-- Institutional Verification Statement -->
       <div style="margin-top: 10px; padding: 7px 10px; background: #f8fafc; border-radius: 4px; font-size: 9px; color: #475569; border: 1px solid #e2e8f0; line-height: 1.35;">
-        <strong>Institutional Notice:</strong> This admission slip certifies that candidate <strong>${app.studentName}</strong> has been officially enrolled at <strong>${branchName} (${branchCode})</strong> of Icon Academy of Information Technology under Institutional Enrollment Number <strong>${enrollment}</strong> for <strong>${app.course}</strong> (${sessionStr}). Valid for identity card issuance, classroom attendance, and examination registration.
+        <strong>Institutional Notice:</strong> This admission slip certifies that candidate <strong>${app.studentName}</strong> has been registered at <strong>${branchName} (${branchCode})</strong> of Icon Academy of Information Technology under Institutional Enrollment Number <strong>${enrollment}</strong> for <strong>${app.course}</strong> (${sessionStr}). Payment Status: <strong>${paymentStatus}</strong>. Valid for identity card issuance, classroom attendance, and examination registration upon administrative verification.
       </div>
 
       <!-- Formal Signatures Row -->

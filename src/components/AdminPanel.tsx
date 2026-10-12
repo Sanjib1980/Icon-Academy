@@ -151,6 +151,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
   const [editingApp, setEditingApp] = useState<AdmissionApplication | null>(null);
   const [deletingAppId, setDeletingAppId] = useState<string | null>(null);
 
+  // Branch Modal States
+  const [isAddBranchOpen, setIsAddBranchOpen] = useState<boolean>(false);
+  const [editingBranch, setEditingBranch] = useState<Branch | null>(null);
+  const [lastCreatedBranchId, setLastCreatedBranchId] = useState<string | null>(null);
+
   // Dedicated useEffect hook to refresh the branch list from Supabase upon successful creation of a new branch
   useEffect(() => {
     if (!lastCreatedBranchId) return;
@@ -175,10 +180,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
     };
   }, [lastCreatedBranchId]);
 
-  // Branch Modal States
-  const [isAddBranchOpen, setIsAddBranchOpen] = useState<boolean>(false);
-  const [editingBranch, setEditingBranch] = useState<Branch | null>(null);
-  const [lastCreatedBranchId, setLastCreatedBranchId] = useState<string | null>(null);
   const [branchForm, setBranchForm] = useState({
     id: '',
     name: '',

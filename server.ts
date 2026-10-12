@@ -49,7 +49,11 @@ interface AdmissionRecord {
   utrNumber: string;
   receiptName?: string;
   receiptUrl?: string;
-  status: 'Pending' | 'Approved' | 'Rejected';
+  payment_status?: string;
+  application_status?: string;
+  registration_fee?: number;
+  payment_method?: string;
+  status: 'Pending' | 'Approved' | 'Rejected' | 'Pending Verification' | string;
   createdAt: string;
 }
 
@@ -605,6 +609,22 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Validation Error: Please select an Academic Course.' });
       }
 
+      // Mandatory Payment Validation (Do not allow empty payment details on Final Submission)
+      const cleanUtr = String(data.utrNumber || '').trim();
+      if (!cleanUtr || cleanUtr.length < 4 || cleanUtr === 'SUBMITTED_PRE_PAYMENT') {
+        return res.status(400).json({
+          success: false,
+          error: 'Validation Error: A valid UTR / Transaction Reference number (minimum 4 characters) is mandatory to submit admission.',
+        });
+      }
+
+      if (!data.receiptUrl && !data.receiptName) {
+        return res.status(400).json({
+          success: false,
+          error: 'Validation Error: Uploading payment receipt / snapshot is mandatory to submit admission.',
+        });
+      }
+
       const db = loadDatabase();
 
       // 2. Validate Branch
@@ -670,10 +690,14 @@ async function startServer() {
         idProofUrl: data.idProofUrl || '',
         marksheetName: data.marksheetName || 'hslc_marksheet.jpg',
         marksheetUrl: data.marksheetUrl || '',
-        utrNumber: data.utrNumber?.trim() || 'SUBMITTED_PRE_PAYMENT',
-        receiptName: data.receiptName || '',
+        utrNumber: cleanUtr,
+        receiptName: data.receiptName || 'payment_receipt.jpg',
         receiptUrl: data.receiptUrl || '',
-        status: 'Approved',
+        payment_status: 'Pending Verification',
+        application_status: 'Pending Verification',
+        registration_fee: 500.00,
+        payment_method: data.payment_method || data.paymentMethod || 'UPI / Online',
+        status: 'Pending Verification',
         createdAt: new Date().toISOString(),
       };
 
@@ -697,7 +721,7 @@ async function startServer() {
           month: 'long',
           year: 'numeric',
         }),
-        status: 'Active Student',
+        status: 'Pending Verification',
         grade: 'Enrolled',
         photoUrl: newAdmission.photoUrl || '',
         verificationHash: `SHA-256: ${enrollmentNumber}...live`,

@@ -373,6 +373,7 @@ export interface AdmissionSubmissionData {
   utrNumber: string;
   receiptName?: string;
   receiptUrl?: string;
+  paymentMethod?: string;
 }
 
 export async function submitAdmissionToCentralDb(
@@ -420,7 +421,7 @@ export async function submitAdmissionToCentralDb(
   const certSerial = `IAIT/PROV/${effectiveYear}/${enrollmentNumber}`;
   const rollNo = `${data.course}-${yy}-${enrollmentNumber.slice(-4)}`;
 
-  // 3. Construct Complete Application Record
+  // 3. Construct Complete Application Record (Do not treat as confirmed payment; use "Pending Verification" until verified)
   const admissionRecord: AdmissionApplication = {
     id: applicationId,
     application_number: applicationId,
@@ -475,18 +476,18 @@ export async function submitAdmissionToCentralDb(
     other_document_url: data.otherDocumentUrl || '',
     utrNumber: data.utrNumber.trim() || 'SUBMITTED',
     utr_number: data.utrNumber.trim() || 'SUBMITTED',
-    payment_status: data.utrNumber && data.utrNumber !== 'SUBMITTED_PRE_PAYMENT' ? 'completed' : 'pending',
+    payment_status: 'Pending Verification',
     registration_fee: 500.00,
-    payment_method: 'UPI / Online',
-    payment_date: data.utrNumber && data.utrNumber !== 'SUBMITTED_PRE_PAYMENT' ? createdAt : null as any,
+    payment_method: data.paymentMethod || 'UPI / Online',
+    payment_date: createdAt,
     payment_receipt_url: cloudReceiptUrl,
     receiptName: data.receiptName || 'payment_receipt.jpg',
     receiptUrl: cloudReceiptUrl,
-    status: 'Approved',
-    application_status: 'Approved',
+    status: 'Pending Verification',
+    application_status: 'Pending Verification',
     certificate_number: certSerial,
     certificate_status: 'Active',
-    remarks: '',
+    remarks: 'Online admission submitted with payment reference. Pending administrative verification.',
     createdAt,
     created_at: createdAt,
     updated_at: createdAt,
@@ -518,7 +519,7 @@ export async function submitAdmissionToCentralDb(
     }),
     admissionDate: data.admissionDate || createdAt.split('T')[0],
     academicSession: `Session ${effectiveYear}-${effectiveYear + 1}`,
-    status: 'Active Student',
+    status: 'Pending Verification',
     grade: 'Enrolled',
     photoUrl: cloudPhotoUrl,
     verificationHash: `SHA-256: ${enrollmentNumber}...live`,
