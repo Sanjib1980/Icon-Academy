@@ -10,7 +10,12 @@ import {
   subscribeToBranches,
 } from '../services/centralDbService';
 import { submitAdmissionToServer } from '../services/admissionService';
-import { getActiveBranches, getBranchById, DEFAULT_MAIN_BRANCH, setStoredBranches } from '../data/branchesData';
+import {
+  getActiveBranches,
+  getBranchById,
+  setStoredBranches,
+  getStoredBranches,
+} from '../data/branchesData';
 import { PaymentQrCode } from './PaymentQrCode';
 import { printAdmissionRecord } from '../utils/printReport';
 import { OfficialAdmissionSlipModal } from './OfficialAdmissionSlipModal';
@@ -80,14 +85,17 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
   setActiveTab,
 }) => {
   const [step, setStep] = useState<number>(1);
-  const [activeBranches, setActiveBranches] = useState<Branch[]>(() => getActiveBranches());
+  const [activeBranches, setActiveBranches] = useState<Branch[]>(() => {
+    const all = getActiveBranches();
+    return all.length > 0 ? all : getStoredBranches();
+  });
   const [validationNotice, setValidationNotice] = useState<string | null>(null);
 
-  // Form State
-  const [formData, setFormData] = useState({
-    branchId: DEFAULT_MAIN_BRANCH.id,
-    branchName: DEFAULT_MAIN_BRANCH.name,
-    branchCode: DEFAULT_MAIN_BRANCH.code,
+  // Form State - Empty branch selection initially to require user to pick their specific branch
+  const [formData, setFormData] = useState(() => ({
+    branchId: '',
+    branchName: '',
+    branchCode: '',
     studentName: '',
     guardianName: '',
     dob: '',
@@ -101,33 +109,41 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
     admissionDate: new Date().toISOString().split('T')[0],
     utrNumber: '',
     declaration: false,
-  });
+  }));
 
   useEffect(() => {
-    // Helper to refresh branches from Supabase Central DB
+    const isItemActive = (b: Branch) => {
+      const s = String(b.status || 'Active').trim().toLowerCase();
+      return s !== 'inactive' && s !== 'disabled' && s !== 'false';
+    };
+
+    // Helper to refresh branches dynamically from Supabase Central DB
     const loadLiveBranches = async () => {
       try {
         const liveBranches = await fetchBranchesFromCentralDb();
         if (liveBranches && liveBranches.length > 0) {
           setStoredBranches(liveBranches);
-          const active = liveBranches.filter((b: Branch) => b.status === 'Active');
-          if (active.length > 0) {
-            setActiveBranches(active);
-            // If current selected branch is not in active list, select default or first
-            setFormData((prev) => {
-              const currentExists = active.some((b) => b.id === prev.branchId);
-              if (!currentExists) {
-                const defaultB = active.find((b) => b.isDefault) || active[0];
+          const active = liveBranches.filter(isItemActive);
+          const available = active.length > 0 ? active : liveBranches;
+          setActiveBranches(available);
+
+          // If the user already selected a branch, verify it still exists or sync updated details
+          setFormData((prev) => {
+            if (prev.branchId) {
+              const matched = available.find(
+                (b) => b.id === prev.branchId || b.code.toUpperCase() === prev.branchCode.toUpperCase()
+              );
+              if (matched) {
                 return {
                   ...prev,
-                  branchId: defaultB.id,
-                  branchName: defaultB.name,
-                  branchCode: defaultB.code,
+                  branchId: matched.id,
+                  branchName: matched.name,
+                  branchCode: matched.code,
                 };
               }
-              return prev;
-            });
-          }
+            }
+            return prev;
+          });
         }
       } catch (err) {
         console.warn('Central DB live branches load note:', err);
@@ -141,35 +157,40 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
     const unsubscribe = subscribeToBranches((updated) => {
       if (updated && updated.length > 0) {
         setStoredBranches(updated);
-        const active = updated.filter((b: Branch) => b.status === 'Active');
-        if (active.length > 0) {
-          setActiveBranches(active);
-          setFormData((prev) => {
-            const currentExists = active.some((b) => b.id === prev.branchId);
-            if (!currentExists) {
-              const defaultB = active.find((b) => b.isDefault) || active[0];
+        const active = updated.filter(isItemActive);
+        const available = active.length > 0 ? active : updated;
+        setActiveBranches(available);
+
+        setFormData((prev) => {
+          if (prev.branchId) {
+            const matched = available.find(
+              (b) => b.id === prev.branchId || b.code.toUpperCase() === prev.branchCode.toUpperCase()
+            );
+            if (matched) {
               return {
                 ...prev,
-                branchId: defaultB.id,
-                branchName: defaultB.name,
-                branchCode: defaultB.code,
+                branchId: matched.id,
+                branchName: matched.name,
+                branchCode: matched.code,
               };
             }
-            return prev;
-          });
-        }
+          }
+          return prev;
+        });
       }
     });
 
-    // 3. Fallback sync on window focus (e.g. user created branch in another tab)
+    // 3. Fallback sync on window focus and local storage change
     const handleFocus = () => {
       loadLiveBranches();
     };
     window.addEventListener('focus', handleFocus);
+    window.addEventListener('iait_branches_changed', handleFocus);
 
     return () => {
       unsubscribe();
       window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('iait_branches_changed', handleFocus);
     };
   }, []);
 
@@ -446,7 +467,7 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
     setIsSubmitting(true);
     setSaveStatus('saving');
 
-    // Resolve target branch
+    // Resolve target branch dynamically from database / active branches
     let selectedBranch = activeBranches.find((b) => b.id === formData.branchId) || getBranchById(formData.branchId);
     if (!selectedBranch && formData.branchCode) {
       selectedBranch = activeBranches.find((b) => b.code.toUpperCase() === formData.branchCode.toUpperCase()) || getBranchById(formData.branchCode);
@@ -454,9 +475,13 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
     if (!selectedBranch && formData.branchName) {
       selectedBranch = activeBranches.find((b) => b.name.toLowerCase() === formData.branchName.toLowerCase()) || getBranchById(formData.branchName);
     }
-    if (!selectedBranch) {
-      selectedBranch = activeBranches.find((b) => b.isDefault) || activeBranches[0] || DEFAULT_MAIN_BRANCH;
+    if (!selectedBranch && activeBranches.length > 0) {
+      selectedBranch = activeBranches.find((b) => b.isDefault) || activeBranches[0];
     }
+
+    const finalBranchId = selectedBranch?.id || formData.branchId;
+    const finalBranchName = selectedBranch?.name || formData.branchName || 'Institutional Centre';
+    const finalBranchCode = selectedBranch?.code || formData.branchCode || 'IC';
 
     try {
       console.log('[AdmissionScreen] Submitting complete admission with verified payment details to Supabase Central DB...');
@@ -468,9 +493,9 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
       // SUBMIT TO CENTRAL DATABASE (public.admissions) WITH CENTRAL SEQUENTIAL ENROLLMENT NUMBER
       const result = await submitAdmissionToCentralDb(
         {
-          branchId: selectedBranch.id,
-          branchName: selectedBranch.name,
-          branchCode: selectedBranch.code,
+          branchId: finalBranchId,
+          branchName: finalBranchName,
+          branchCode: finalBranchCode,
           studentName: formData.studentName.trim(),
           guardianName: formData.guardianName.trim() || 'Guardian',
           fatherName: formData.guardianName.trim() || 'Guardian',
@@ -518,9 +543,9 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
         studentName: formData.studentName.trim(),
         guardianName: formData.guardianName.trim() || 'Guardian',
         course: formData.course,
-        branchId: selectedBranch.id,
-        branchName: selectedBranch.name,
-        branchCode: selectedBranch.code,
+        branchId: finalBranchId,
+        branchName: finalBranchName,
+        branchCode: finalBranchCode,
         admissionDate: formData.admissionDate,
         utrNumber: formData.utrNumber.trim(),
         payment_status: 'Pending Verification',
@@ -578,8 +603,8 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
       batch: formData.batch,
       admissionDate: formData.admissionDate,
       branchId: bId,
-      branchName: formData.branchName || bObj?.name || 'Main Branch',
-      branchCode: formData.branchCode || bObj?.code || 'MAIN',
+      branchName: formData.branchName || bObj?.name || 'Institutional Centre',
+      branchCode: formData.branchCode || bObj?.code || 'IC',
       utrNumber: formData.utrNumber,
       payment_status: 'Pending Verification',
       application_status: 'Pending Verification',
@@ -609,9 +634,9 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
 
   const resetFormForNewAdmission = () => {
     setFormData({
-      branchId: DEFAULT_MAIN_BRANCH.id,
-      branchName: DEFAULT_MAIN_BRANCH.name,
-      branchCode: DEFAULT_MAIN_BRANCH.code,
+      branchId: '',
+      branchName: '',
+      branchCode: '',
       studentName: '',
       guardianName: '',
       dob: '',
@@ -928,9 +953,12 @@ export const AdmissionScreen: React.FC<AdmissionScreenProps> = ({
                   onChange={handleBranchChange}
                   className="w-full appearance-none bg-white text-[#111c2d] rounded-xl pl-10 pr-10 py-3 text-sm font-semibold shadow-xs border border-[#dee8ff] focus:outline-none focus:border-[#0051d5] transition-colors"
                 >
+                  <option value="" disabled>
+                    -- Select Admission Branch / Study Centre --
+                  </option>
                   {activeBranches.map((branch) => (
                     <option key={branch.id} value={branch.id}>
-                      {branch.name} ({branch.code}) {branch.isDefault ? '• Head Office / Main' : ''}
+                      {branch.name} ({branch.code})
                     </option>
                   ))}
                 </select>

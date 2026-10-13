@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { AdmissionApplication, Branch } from '../types';
 import { IaitLogo } from './IaitLogo';
 import { downloadElementAsPdf, printAdmissionRecord } from '../utils/printReport';
+import { getBranchById, findBranch } from '../data/branchesData';
 
 interface OfficialAdmissionSlipModalProps {
   isOpen: boolean;
@@ -34,10 +35,14 @@ export const OfficialAdmissionSlipModal: React.FC<OfficialAdmissionSlipModalProp
 
   if (!isOpen || !record) return null;
 
-  const branchName = record.branchName || branch?.name || 'Main Branch';
-  const branchCode = record.branchCode || branch?.code || 'MAIN';
-  const branchAddress = branch?.address || record.address || 'Assam Center, India';
-  const branchPhone = branch?.phone || '8638611886';
+  const resolvedBranch =
+    branch ||
+    getBranchById(record.branchId) ||
+    findBranch({ id: record.branchId, code: record.branchCode, name: record.branchName });
+  const branchName = record.branchName || resolvedBranch?.name || 'Institutional Centre';
+  const branchCode = record.branchCode || resolvedBranch?.code || 'IC';
+  const branchAddress = resolvedBranch?.address || record.address || 'Assam Center, India';
+  const branchPhone = resolvedBranch?.phone || '8638611886';
   const enrollment = record.enrollmentId || record.id;
   const admDate =
     record.admissionDate ||

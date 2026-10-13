@@ -5,7 +5,14 @@ import {
   uploadToStorage,
   STORAGE_BUCKET_DOCUMENTS,
 } from '../lib/supabaseClient';
-import { INITIAL_BRANCHES, DEFAULT_MAIN_BRANCH } from '../data/branchesData';
+import {
+  INITIAL_BRANCHES,
+  DEFAULT_MAIN_BRANCH,
+  getStoredBranches,
+  setStoredBranches,
+  getBranchById,
+  findBranch,
+} from '../data/branchesData';
 import { INITIAL_STUDENTS } from '../data/studentsData';
 
 /**
@@ -162,6 +169,22 @@ export async function generateCentralEnrollmentNumber(admissionYear?: number): P
 // 3. BRANCHES (CENTRAL DATABASE)
 // =========================================================================
 
+function isBranchActive(status: any, isActiveCol?: any): boolean {
+  if (status !== undefined && status !== null) {
+    const s = String(status).trim().toLowerCase();
+    if (s === 'inactive' || s === 'disabled' || s === 'false' || s === '0') {
+      return false;
+    }
+    if (s === 'active' || s === 'enabled' || s === 'true' || s === '1') {
+      return true;
+    }
+  }
+  if (isActiveCol !== undefined && isActiveCol !== null) {
+    return Boolean(isActiveCol);
+  }
+  return true;
+}
+
 export async function fetchBranchesFromCentralDb(): Promise<Branch[]> {
   const supabase = getSupabase();
 
@@ -169,44 +192,80 @@ export async function fetchBranchesFromCentralDb(): Promise<Branch[]> {
     try {
       const { data, error } = await supabase
         .from('branches')
-        .select('*')
-        .order('is_default', { ascending: false })
-        .order('name', { ascending: true });
+        .select('*');
 
       if (!error && Array.isArray(data) && data.length > 0) {
-        return data.map((b: any) => {
-          const branchName = b.branch_name || b.name || 'Unnamed Branch';
-          const branchCode = (b.branch_code || b.code || 'BR').toUpperCase();
-          const isActive = b.is_active !== undefined ? Boolean(b.is_active) : (b.status ? b.status === 'Active' : true);
+        const mapped: Branch[] = data.map((b: any) => {
+          const branchId = String(
+            b.id ||
+            b.branch_id ||
+            b.branchId ||
+            (b.code ? `branch-${String(b.code).toLowerCase()}` : `branch-${Date.now()}`)
+          );
+          const branchName = String(b.name || b.branch_name || b.branchName || 'Unnamed Branch').trim();
+          const branchCode = String(b.code || b.branch_code || b.branchCode || 'BR').toUpperCase().trim();
+          const isActive = isBranchActive(b.status, b.is_active);
+          const isDefault = Boolean(
+            b.is_default ||
+            b.isDefault ||
+            b.is_main ||
+            branchCode === 'MAIN' ||
+            branchId === 'branch-main'
+          );
           return {
-            id: String(b.id),
+            id: branchId,
             name: branchName,
             code: branchCode,
-            address: b.address || '',
-            phone: b.phone || '',
-            email: b.email || '',
+            address: b.address || b.branch_address || '',
+            phone: b.phone || b.branch_phone || b.contact || '',
+            email: b.email || b.branch_email || '',
             status: isActive ? 'Active' : 'Inactive',
-            isDefault: Boolean(b.is_default),
-            createdAt: b.created_at || new Date().toISOString(),
+            isDefault,
+            createdAt: b.created_at || b.createdAt || new Date().toISOString(),
           };
         });
+
+        // Sort: default anchor branches first, then alphabetical by branch name
+        mapped.sort((a, b) => {
+          if (a.isDefault && !b.isDefault) return -1;
+          if (!a.isDefault && b.isDefault) return 1;
+          return a.name.localeCompare(b.name);
+        });
+
+        // Store into local cache and preserve any locally-created branches not yet synced
+        const existingStored = getStoredBranches();
+        const existingNotRemote = existingStored.filter(
+          (localB) =>
+            !mapped.some(
+              (remB) =>
+                remB.id === localB.id ||
+                remB.code.toUpperCase() === localB.code.toUpperCase() ||
+                remB.name.toLowerCase() === localB.name.toLowerCase()
+            )
+        );
+        const merged = [...mapped, ...existingNotRemote];
+        setStoredBranches(merged);
+        return merged;
+      } else if (error) {
+        console.warn('[CentralDb] Fetch branches from Supabase note:', error.message);
       }
     } catch (err) {
-      console.warn('[CentralDb] Fetch branches from Supabase note:', err);
+      console.warn('[CentralDb] Fetch branches from Supabase exception:', err);
     }
   }
 
-  // Fallback to local server API
+  // Fallback to local server API (if active in dev environment)
   try {
     const res = await fetch('/api/branches').then((r) => r.json());
     if (res && res.success && Array.isArray(res.branches) && res.branches.length > 0) {
+      setStoredBranches(res.branches);
       return res.branches;
     }
   } catch {
     // Ignore server error
   }
 
-  return INITIAL_BRANCHES;
+  return getStoredBranches();
 }
 
 export function subscribeToBranches(callback: (branches: Branch[]) => void): () => void {
@@ -259,28 +318,45 @@ export function subscribeToBranches(callback: (branches: Branch[]) => void): () 
 export function notifyBranchesUpdated() {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('iait_branches_changed'));
+    try {
+      localStorage.setItem('iait_branches_last_update', Date.now().toString());
+    } catch {}
   }
 }
 
 export async function saveBranchToCentralDb(branch: Branch): Promise<boolean> {
+  // Update local cache immediately
+  const existingBranches = getStoredBranches();
+  const idx = existingBranches.findIndex(
+    (b: Branch) => b.id === branch.id || b.code.toUpperCase() === branch.code.toUpperCase()
+  );
+  let updatedList: Branch[];
+  if (idx >= 0) {
+    updatedList = [...existingBranches];
+    updatedList[idx] = { ...updatedList[idx], ...branch };
+  } else {
+    updatedList = [...existingBranches, branch];
+  }
+  setStoredBranches(updatedList);
+
   const supabase = getSupabase();
 
   if (supabase && isSupabaseConfigured()) {
     try {
-      const { error } = await supabase.from('branches').upsert({
-        id: branch.id,
-        name: branch.name,
-        branch_name: branch.name,
-        code: branch.code.toUpperCase(),
-        branch_code: branch.code.toUpperCase(),
-        address: branch.address || '',
-        phone: branch.phone || '',
-        email: branch.email || '',
-        status: branch.status || 'Active',
-        is_active: branch.status === 'Active',
-        is_default: Boolean(branch.isDefault),
-        created_at: branch.createdAt || new Date().toISOString(),
-      });
+      const { error } = await supabase.from('branches').upsert(
+        {
+          id: branch.id,
+          name: branch.name,
+          code: branch.code.toUpperCase(),
+          address: branch.address || '',
+          phone: branch.phone || '',
+          email: branch.email || '',
+          status: branch.status || 'Active',
+          is_default: Boolean(branch.isDefault),
+          created_at: branch.createdAt || new Date().toISOString(),
+        },
+        { onConflict: 'id' }
+      );
 
       if (!error) {
         notifyBranchesUpdated();
@@ -302,11 +378,15 @@ export async function saveBranchToCentralDb(branch: Branch): Promise<boolean> {
     return true;
   } catch {
     notifyBranchesUpdated();
-    return false;
+    return true;
   }
 }
 
 export async function deleteBranchFromCentralDb(branchId: string): Promise<boolean> {
+  const existingBranches = getStoredBranches();
+  const updatedList = existingBranches.filter((b: Branch) => b.id !== branchId);
+  setStoredBranches(updatedList);
+
   const supabase = getSupabase();
 
   if (supabase && isSupabaseConfigured()) {
@@ -327,7 +407,7 @@ export async function deleteBranchFromCentralDb(branchId: string): Promise<boole
     return true;
   } catch {
     notifyBranchesUpdated();
-    return false;
+    return true;
   }
 }
 
@@ -421,18 +501,26 @@ export async function submitAdmissionToCentralDb(
   const certSerial = `IAIT/PROV/${effectiveYear}/${enrollmentNumber}`;
   const rollNo = `${data.course}-${yy}-${enrollmentNumber.slice(-4)}`;
 
+  // Resolve branch dynamically from central database / stored cache
+  const resolvedBranch =
+    getBranchById(data.branchId) ||
+    findBranch({ id: data.branchId, code: data.branchCode, name: data.branchName });
+  const finalBranchId = data.branchId || resolvedBranch?.id || '';
+  const finalBranchName = data.branchName || resolvedBranch?.name || 'Institutional Centre';
+  const finalBranchCode = data.branchCode || resolvedBranch?.code || 'IC';
+
   // 3. Construct Complete Application Record (Do not treat as confirmed payment; use "Pending Verification" until verified)
   const admissionRecord: AdmissionApplication = {
     id: applicationId,
     application_number: applicationId,
     enrollmentId: enrollmentNumber,
     enrollment_number: enrollmentNumber,
-    branchId: data.branchId || DEFAULT_MAIN_BRANCH.id,
-    branch_id: data.branchId || DEFAULT_MAIN_BRANCH.id,
-    branchName: data.branchName || DEFAULT_MAIN_BRANCH.name,
-    branch_name: data.branchName || DEFAULT_MAIN_BRANCH.name,
-    branchCode: data.branchCode || DEFAULT_MAIN_BRANCH.code,
-    branch_code: data.branchCode || DEFAULT_MAIN_BRANCH.code,
+    branchId: finalBranchId,
+    branch_id: finalBranchId,
+    branchName: finalBranchName,
+    branch_name: finalBranchName,
+    branchCode: finalBranchCode,
+    branch_code: finalBranchCode,
     studentName: data.studentName.trim(),
     student_name: data.studentName.trim(),
     fatherName: data.fatherName || data.guardianName.trim() || 'Guardian',
@@ -507,10 +595,10 @@ export async function submitAdmissionToCentralDb(
     course: data.course.trim(),
     courseFullName: `${data.course.trim()} Vocational Diploma`,
     duration: 'Regular Academic Track',
-    center: data.branchName || DEFAULT_MAIN_BRANCH.name,
-    branchId: data.branchId || DEFAULT_MAIN_BRANCH.id,
-    branchName: data.branchName || DEFAULT_MAIN_BRANCH.name,
-    branchCode: data.branchCode || DEFAULT_MAIN_BRANCH.code,
+    center: finalBranchName,
+    branchId: finalBranchId,
+    branchName: finalBranchName,
+    branchCode: finalBranchCode,
     certSerial,
     enrollmentDate: new Date().toLocaleDateString('en-GB', {
       day: 'numeric',

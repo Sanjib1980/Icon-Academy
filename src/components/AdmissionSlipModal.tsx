@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { AdmissionApplication, Branch } from '../types';
 import { IaitLogo } from './IaitLogo';
 import { printAdmissionRecord, downloadElementAsPdf } from '../utils/printReport';
+import { getBranchById, findBranch } from '../data/branchesData';
 
 interface AdmissionSlipModalProps {
   admission: AdmissionApplication;
@@ -25,10 +26,15 @@ export const AdmissionSlipModal: React.FC<AdmissionSlipModalProps> = ({
 
   if (!isOpen) return null;
 
-  const branchName = admission.branchName || branch?.name || 'Main Branch';
-  const branchCode = admission.branchCode || branch?.code || 'MAIN';
-  const branchAddress = branch?.address || admission.address || 'Kuwaritol, Kaliabor, Nagaon, Assam - 782137';
-  const branchPhone = branch?.phone || '8638611886';
+  const resolvedBranch =
+    branch ||
+    getBranchById(admission.branchId) ||
+    findBranch({ id: admission.branchId, code: admission.branchCode, name: admission.branchName });
+  const branchName = admission.branchName || resolvedBranch?.name || 'Institutional Centre';
+  const branchCode = admission.branchCode || resolvedBranch?.code || 'IC';
+  const branchAddress =
+    resolvedBranch?.address || admission.address || 'Kuwaritol, Kaliabor, Nagaon, Assam - 782137';
+  const branchPhone = resolvedBranch?.phone || '8638611886';
   const enrollment = admission.enrollmentId || admission.id;
   const admDate = admission.admissionDate || (admission.createdAt ? admission.createdAt.split('T')[0] : new Date().toISOString().split('T')[0]);
   const year = admDate ? new Date(admDate).getFullYear() : new Date().getFullYear();

@@ -69,46 +69,57 @@ export const INITIAL_BRANCHES: Branch[] = [
     isDefault: false,
     createdAt: '2026-10-01T09:56:43.101Z',
   },
+  {
+    id: 'branch-jakhalabandha',
+    name: 'Jakhalabandha Study Center',
+    code: 'JKB',
+    address: 'Main Market, Jakhalabandha, Nagaon, Assam - 782136',
+    phone: '8486950123',
+    email: 'jakhalabandha@iait.ac.in',
+    status: 'Active',
+    isDefault: false,
+    createdAt: '2026-10-08T08:15:46.771Z',
+  },
+  {
+    id: 'branch-p01-8228',
+    name: 'pp',
+    code: 'P01',
+    address: 'vill- BORUAATI, Nagaon, Assam',
+    phone: '8638611886',
+    email: 'sanjib.upadhayaya@gmail.com',
+    status: 'Active',
+    isDefault: false,
+    createdAt: '2026-10-08T09:21:48.229Z',
+  },
+  {
+    id: '09ff27b9-c89f-4452-9c25-27f4eac9cb2b',
+    name: 'Jorhat Branch',
+    code: '5G',
+    address: 'Jorhat, Assam',
+    phone: '7856565789',
+    email: 'kcd303@gmail.com',
+    status: 'Active',
+    isDefault: false,
+    createdAt: '2026-10-13T10:41:17.680Z',
+  },
 ];
 
 const STORAGE_KEY = 'iait_branches';
 
 /**
  * Retrieve all configured branches from database / storage.
- * Ensures the default Main Branch always exists, along with standard branches.
+ * Reads dynamically from local cache (synced with Supabase Central DB).
  */
 export function getStoredBranches(): Branch[] {
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
-    let list: Branch[] = INITIAL_BRANCHES;
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        list = parsed;
+        return parsed;
       }
     }
-
-    // Merge standard branches (like Branch 01, Branch 02) if not already in list
-    for (const initB of INITIAL_BRANCHES) {
-      const exists = list.some(
-        (b) => b.id === initB.id || b.code.toUpperCase() === initB.code.toUpperCase()
-      );
-      if (!exists) {
-        list.push(initB);
-      }
-    }
-
-    // Ensure default Main Branch is present
-    const hasMain = list.some((b) => b.isDefault || b.id === 'branch-main' || b.code === 'MAIN');
-    if (!hasMain) {
-      list = [DEFAULT_MAIN_BRANCH, ...list];
-    }
-
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-    }
-
-    return list;
+    return INITIAL_BRANCHES;
   } catch (err) {
     console.error('Error reading branches:', err);
     return INITIAL_BRANCHES;
@@ -116,13 +127,15 @@ export function getStoredBranches(): Branch[] {
 }
 
 /**
- * Sync remote branches into client storage
+ * Sync remote branches into client storage and notify listeners
  */
 export function setStoredBranches(branchesList: Branch[]): void {
   if (!Array.isArray(branchesList) || branchesList.length === 0) return;
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(branchesList));
+      localStorage.setItem('iait_branches_last_update', Date.now().toString());
+      window.dispatchEvent(new CustomEvent('iait_branches_changed'));
     }
   } catch (err) {
     console.warn('Failed to cache branches to localStorage:', err);
@@ -133,7 +146,10 @@ export function setStoredBranches(branchesList: Branch[]): void {
  * Get all active branches available for student enrollment
  */
 export function getActiveBranches(): Branch[] {
-  return getStoredBranches().filter((b) => b.status === 'Active');
+  return getStoredBranches().filter((b) => {
+    const s = String(b.status || 'Active').trim().toLowerCase();
+    return s !== 'inactive' && s !== 'disabled' && s !== 'false';
+  });
 }
 
 /**
@@ -220,10 +236,17 @@ export function createBranch(
     createdAt: new Date().toISOString(),
   };
 
-  const updated = [...existingBranches, newBranch];
+  const updated = [
+    ...existingBranches.filter(
+      (b) => b.id !== newBranch.id && b.code.toUpperCase() !== newBranch.code.toUpperCase()
+    ),
+    newBranch,
+  ];
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      localStorage.setItem('iait_branches_last_update', Date.now().toString());
+      window.dispatchEvent(new CustomEvent('iait_branches_changed'));
     }
     return { success: true, message: `Branch "${cleanName}" created successfully!`, branch: newBranch };
   } catch (err) {
@@ -278,6 +301,8 @@ export function updateBranch(
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(existingBranches));
+      localStorage.setItem('iait_branches_last_update', Date.now().toString());
+      window.dispatchEvent(new CustomEvent('iait_branches_changed'));
     }
     return { success: true, message: `Branch "${cleanName}" updated successfully!` };
   } catch (err) {
@@ -307,6 +332,8 @@ export function toggleBranchStatus(
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(existingBranches));
+      localStorage.setItem('iait_branches_last_update', Date.now().toString());
+      window.dispatchEvent(new CustomEvent('iait_branches_changed'));
     }
     return {
       success: true,
@@ -353,6 +380,8 @@ export function deleteBranch(
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      localStorage.setItem('iait_branches_last_update', Date.now().toString());
+      window.dispatchEvent(new CustomEvent('iait_branches_changed'));
     }
     return { success: true, message: `Branch "${branch.name}" deleted successfully.` };
   } catch {

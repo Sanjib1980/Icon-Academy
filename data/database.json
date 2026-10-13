@@ -54,6 +54,39 @@
       "status": "Active",
       "isDefault": false,
       "createdAt": "2025-06-01T00:00:00Z"
+    },
+    {
+      "id": "branch-klb01-1884",
+      "name": "Kaliabor North Branch",
+      "code": "KLB01",
+      "address": "Kaliabor Chariali, Nagaon, Assam - 782137",
+      "phone": "9864019999",
+      "email": "kaliabor@iaitassam.in",
+      "status": "Active",
+      "isDefault": false,
+      "createdAt": "2026-10-13T10:03:21.884Z"
+    },
+    {
+      "id": "branch-5g-0031",
+      "name": "5G",
+      "code": "5G",
+      "address": "JORHAT",
+      "phone": "08638611886",
+      "email": "sanjib.upadhayaya@gmail.com",
+      "status": "Active",
+      "isDefault": false,
+      "createdAt": "2026-10-13T10:07:58.750Z"
+    },
+    {
+      "id": "branch-ghy01-1971",
+      "name": "Guwahati Regional Center",
+      "code": "GHY01",
+      "address": "GS Road, Christian Basti, Guwahati, Assam - 781005",
+      "phone": "9864098765",
+      "email": "guwahati@iaitassam.in",
+      "status": "Active",
+      "isDefault": false,
+      "createdAt": "2026-10-13T10:59:11.971Z"
     }
   ],
   "admissions": [

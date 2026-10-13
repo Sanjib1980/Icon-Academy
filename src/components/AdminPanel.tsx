@@ -92,27 +92,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
       console.warn('Central admissions fetch note:', e);
     }
 
-    // Also sync from server API if active
-    fetch('/api/branches')
-      .then((r) => r.json())
-      .then((res) => {
-        if (res && res.success && Array.isArray(res.branches) && res.branches.length > 0) {
-          setBranches(res.branches);
-          setStoredBranches(res.branches);
-        }
-      })
-      .catch(() => {});
-
-    fetch('/api/admissions')
-      .then((r) => r.json())
-      .then((res) => {
-        if (res && res.success && Array.isArray(res.admissions)) {
-          setApplications(res.admissions);
-          setStoredApplications(res.admissions);
-        }
-      })
-      .catch(() => {});
-
     fetch('/api/students')
       .then((r) => r.json())
       .then((res) => {
@@ -495,15 +474,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
       setLastCreatedBranchId(branchToSave.id);
     }
 
-    fetch(`/api/branches/${branchToSave.id}`, {
-      method: editingBranch ? 'PUT' : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(branchToSave),
-    }).catch((e) => console.warn('Branch API sync note:', e));
-
     showToast(editingBranch ? 'Branch updated successfully in Central Database!' : 'Branch created successfully in Central Database!');
     setIsAddBranchOpen(false);
-    refreshData();
+    await refreshData();
   };
 
   const handleToggleStatus = async (branch: Branch) => {
@@ -555,9 +528,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
       branchObj = branches.find((b) => b.name.toLowerCase() === n);
     }
 
-    const finalBranchId = branchObj?.id || editingApp.branchId || 'branch-main';
-    const finalBranchName = branchObj?.name || editingApp.branchName || 'Main Branch';
-    const finalBranchCode = branchObj?.code || editingApp.branchCode || 'MAIN';
+    const finalBranchId = branchObj?.id || editingApp.branchId || (branches[0]?.id ?? '');
+    const finalBranchName = branchObj?.name || editingApp.branchName || (branches[0]?.name ?? 'Institutional Centre');
+    const finalBranchCode = branchObj?.code || editingApp.branchCode || (branches[0]?.code ?? 'IC');
 
     const updates = {
       studentName: editingApp.studentName,
@@ -656,9 +629,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
 
     records.forEach((a) => {
       const bObj = branches.find((b) => b.id === a.branchId || b.code === a.branchCode);
-      const bId = a.branchId || bObj?.id || 'branch-main';
-      const bName = a.branchName || bObj?.name || 'Main Branch';
-      const bCode = a.branchCode || bObj?.code || 'MAIN';
+      const bId = a.branchId || bObj?.id || '';
+      const bName = a.branchName || bObj?.name || 'Institutional Centre';
+      const bCode = a.branchCode || bObj?.code || 'IC';
       const enrollmentNo = String(a.enrollmentId || a.id || '').trim();
       const admDate = a.admissionDate || (a.createdAt ? a.createdAt.split('T')[0] : '');
       const year = admDate ? new Date(admDate).getFullYear() : new Date().getFullYear();
@@ -1437,8 +1410,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
                           </td>
                           <td className="py-3 px-3">
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-blue-50 text-[#00163d] font-medium text-[11px] border border-blue-200">
-                              <span className="font-bold text-[#0051d5]">{app.branchCode || branch?.code || 'MAIN'}</span>
-                              <span className="truncate max-w-[120px]">{app.branchName || branch?.name || 'Main Branch'}</span>
+                              <span className="font-bold text-[#0051d5]">{app.branchCode || branch?.code || 'IC'}</span>
+                              <span className="truncate max-w-[120px]">{app.branchName || branch?.name || 'Institutional Centre'}</span>
                             </span>
                           </td>
                           <td className="py-3 px-3">
@@ -1961,7 +1934,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
                   <div>
                     <span className="text-[#747780] block text-[9px] uppercase font-bold">Assigned Branch</span>
                     <strong className="text-[#0051d5]">
-                      {viewingApp.branchName || 'Main Branch'} ({viewingApp.branchCode || 'MAIN'})
+                      {viewingApp.branchName || 'Institutional Centre'} ({viewingApp.branchCode || 'IC'})
                     </strong>
                   </div>
                   <div>
@@ -2196,7 +2169,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
                         (editingApp.branchCode && b.code.toUpperCase() === editingApp.branchCode.toUpperCase()) ||
                         (editingApp.branchName && b.name.toLowerCase() === editingApp.branchName.toLowerCase())
                     );
-                    return matched?.id || editingApp.branchId || 'branch-main';
+                    return matched?.id || editingApp.branchId || (branches[0]?.id ?? '');
                   })()}
                   onChange={(e) => {
                     const b = branches.find((item) => item.id === e.target.value);
@@ -2213,7 +2186,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToPortal }) => {
                 >
                   {branches.map((b) => (
                     <option key={b.id} value={b.id}>
-                      {b.name} ({b.code}) {b.isDefault ? '• Main' : ''}
+                      {b.name} ({b.code})
                     </option>
                   ))}
                 </select>

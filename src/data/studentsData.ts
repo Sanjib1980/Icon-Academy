@@ -46,19 +46,20 @@ function resolveBranchFields(item: {
     }
   }
 
-  // 4. If completely absent on old legacy record, fallback safely to Main Branch
+  // 4. Resolve branch info preserving custom/newly created branches
   if (!branchId && !branchName && !branchCode) {
-    branchId = 'branch-main';
-    branchName = 'Main Branch';
-    branchCode = 'MAIN';
+    const defaultBranch = getStoredBranches().find((b) => b.isDefault) || getStoredBranches()[0];
+    branchId = defaultBranch?.id || 'branch-main';
+    branchName = defaultBranch?.name || 'Main Branch';
+    branchCode = defaultBranch?.code || 'MAIN';
   } else {
-    // Preserve custom or specified branch without replacing with Main Branch
+    const resolved = (branchId ? getBranchById(branchId) : null) || (branchCode ? getBranchById(branchCode) : null);
     if (!branchId && branchCode) {
-      branchId = `branch-${branchCode.toLowerCase()}`;
+      branchId = resolved?.id || `branch-${branchCode.toLowerCase()}`;
     }
-    branchId = branchId || 'branch-main';
-    branchName = branchName || 'Main Branch';
-    branchCode = branchCode || 'MAIN';
+    branchId = branchId || resolved?.id || '';
+    branchName = branchName || resolved?.name || item.center || 'Institutional Centre';
+    branchCode = branchCode || resolved?.code || 'IC';
   }
 
   return { branchId, branchName, branchCode };

@@ -1,6 +1,6 @@
 import { AdmissionApplication, StudentRecord } from '../types';
 import { submitAdmissionToCentralDb, AdmissionSubmissionData } from './centralDbService';
-import { getBranchById, DEFAULT_MAIN_BRANCH } from '../data/branchesData';
+import { getBranchById, getStoredBranches } from '../data/branchesData';
 
 export interface AdmissionSubmissionResult {
   success: boolean;
@@ -72,15 +72,24 @@ export async function submitAdmissionToServer(
     }
   }
 
-  // Fallback to Main Branch only if completely omitted
+  // Resolve branch dynamically from central database / stored cache
+  const resolved = (branchId ? getBranchById(branchId) : null) || (branchCode ? getBranchById(branchCode) : null);
+  if (resolved) {
+    branchId = branchId || resolved.id;
+    branchName = branchName || resolved.name;
+    branchCode = branchCode || resolved.code;
+  }
+
+  // Fallback only if completely omitted
   if (!branchId && !branchName && !branchCode) {
-    branchId = DEFAULT_MAIN_BRANCH.id;
-    branchName = DEFAULT_MAIN_BRANCH.name;
-    branchCode = DEFAULT_MAIN_BRANCH.code;
+    const defaultBranch = getStoredBranches().find((b) => b.isDefault) || getStoredBranches()[0];
+    branchId = defaultBranch?.id || '';
+    branchName = defaultBranch?.name || 'Institutional Centre';
+    branchCode = defaultBranch?.code || 'IC';
   } else {
-    branchId = branchId || (branchCode ? `branch-${branchCode.toLowerCase()}` : DEFAULT_MAIN_BRANCH.id);
-    branchName = branchName || DEFAULT_MAIN_BRANCH.name;
-    branchCode = branchCode || DEFAULT_MAIN_BRANCH.code;
+    branchId = branchId || (branchCode ? `branch-${branchCode.toLowerCase()}` : '');
+    branchName = branchName || 'Institutional Centre';
+    branchCode = branchCode || 'IC';
   }
 
   console.log(`[AdmissionService] Submitting admission for ${data.studentName} to branch ${branchName} (${branchCode}) via Central Database...`);

@@ -44,8 +44,8 @@ export const AdmissionSlipPrintModal: React.FC<AdmissionSlipPrintModalProps> = (
   if (!admission) return null;
 
   // Resolve accurate branch information without defaulting to Main Branch if custom branch present
-  const branchName = admission.branchName || branch?.name || 'Main Branch';
-  const branchCode = admission.branchCode || branch?.code || 'MAIN';
+  const branchName = admission.branchName || branch?.name || 'Institutional Centre';
+  const branchCode = admission.branchCode || branch?.code || 'IC';
   const branchAddress = branch?.address || admission.address || 'Assam, India';
   const branchPhone = branch?.phone || '8638611886';
   const enrollmentNumber = String(admission.enrollmentId || admission.id || '').trim();

@@ -158,6 +158,39 @@ const DEFAULT_BRANCHES: BranchRecord[] = [
     isDefault: false,
     createdAt: '2026-10-01T09:56:43.101Z',
   },
+  {
+    id: 'branch-jakhalabandha',
+    name: 'Jakhalabandha Study Center',
+    code: 'JKB',
+    address: 'Main Market, Jakhalabandha, Nagaon, Assam - 782136',
+    phone: '8486950123',
+    email: 'jakhalabandha@iait.ac.in',
+    status: 'Active',
+    isDefault: false,
+    createdAt: '2026-10-08T08:15:46.771Z',
+  },
+  {
+    id: 'branch-p01-8228',
+    name: 'pp',
+    code: 'P01',
+    address: 'vill- BORUAATI, Nagaon, Assam',
+    phone: '8638611886',
+    email: 'sanjib.upadhayaya@gmail.com',
+    status: 'Active',
+    isDefault: false,
+    createdAt: '2026-10-08T09:21:48.229Z',
+  },
+  {
+    id: '09ff27b9-c89f-4452-9c25-27f4eac9cb2b',
+    name: 'Jorhat Branch',
+    code: '5G',
+    address: 'Jorhat, Assam',
+    phone: '7856565789',
+    email: 'kcd303@gmail.com',
+    status: 'Active',
+    isDefault: false,
+    createdAt: '2026-10-13T10:41:17.680Z',
+  },
 ];
 
 const DEFAULT_STUDENTS: StudentVerificationRecord[] = [
@@ -473,13 +506,27 @@ async function startServer() {
     const db = loadDatabase();
     const cleanCode = code.trim().toUpperCase();
 
-    // Check code duplication
-    if (db.branches.some((b) => b.code.toUpperCase() === cleanCode)) {
-      return res.status(400).json({ success: false, error: `Branch code "${cleanCode}" already exists.` });
+    // Check if branch already exists by ID or Code
+    const existingIdx = db.branches.findIndex(
+      (b) => (req.body.id && b.id === req.body.id) || b.code.toUpperCase() === cleanCode
+    );
+
+    if (existingIdx !== -1) {
+      db.branches[existingIdx] = {
+        ...db.branches[existingIdx],
+        name: name.trim(),
+        code: cleanCode,
+        address: address?.trim() || db.branches[existingIdx].address,
+        phone: phone?.trim() || db.branches[existingIdx].phone,
+        email: email?.trim() || db.branches[existingIdx].email,
+        status: status === 'Inactive' ? 'Inactive' : 'Active',
+      };
+      saveDatabase(db);
+      return res.json({ success: true, branch: db.branches[existingIdx] });
     }
 
     const newBranch: BranchRecord = {
-      id: `branch-${cleanCode.toLowerCase()}-${Date.now().toString().slice(-4)}`,
+      id: req.body.id || `branch-${cleanCode.toLowerCase()}-${Date.now().toString().slice(-4)}`,
       name: name.trim(),
       code: cleanCode,
       address: address?.trim() || '',

@@ -141,104 +141,168 @@ export function printHtmlContent(title: string, htmlContent: string): void {
  * html2canvas 1.4.x does not support CSS Color Module 4 `oklch(...)`, which
  * Tailwind CSS v4 generates by default.
  */
+/**
+ * Convert modern OKLCH CSS color strings to standard RGB / RGBA strings.
+ * html2canvas 1.4.x does not support CSS Color Module 4 `oklch(...)`, which
+ * Tailwind CSS v4 generates by default.
+ */
 function convertOklchToRgb(str: string): string {
   if (!str || typeof str !== 'string' || !str.includes('oklch')) {
     return str;
   }
-  return str.replace(/oklch\(\s*([\d.]+)%?\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+%?))?\s*\)/gi, (match, lStr, cStr, hStr, aStr) => {
+
+  // Matches oklch(...) expressions inside styles, CSS variables, linear-gradient, box-shadow, etc.
+  return str.replace(/oklch\(\s*([^()]+)\s*\)/gi, (fullMatch, content) => {
     try {
-      let L = parseFloat(lStr);
-      if (lStr.includes('%') || L > 1) L = L / 100;
-      const C = parseFloat(cStr);
-      const hDeg = parseFloat(hStr);
-      let alpha = 1;
-      if (aStr) {
-        alpha = aStr.includes('%') ? parseFloat(aStr) / 100 : parseFloat(aStr);
+      const slashParts = content.split('/');
+      const colorParts = slashParts[0].trim().split(/\s+/);
+      const alphaPart = slashParts[1] ? slashParts[1].trim() : null;
+
+      if (colorParts.length < 3) {
+        return 'rgb(0, 0, 0)';
       }
-      const hRad = (hDeg * Math.PI) / 180;
-      const a = C * Math.cos(hRad);
-      const b = C * Math.sin(hRad);
 
-      const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
-      const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
-      const s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+      // 1. Lightness (L): 0..1 or 0%..100% or "none"
+      let L = 0;
+      if (colorParts[0] !== 'none') {
+        if (colorParts[0].endsWith('%')) {
+          L = parseFloat(colorParts[0]) / 100;
+        } else {
+          L = parseFloat(colorParts[0]);
+        }
+      }
 
-      const l = l_ * l_ * l_;
-      const m__ = m_ * m_ * m_;
-      const s = s_ * s_ * s_;
+      // 2. Chroma (C): 0..0.4+ or "none"
+      let C = 0;
+      if (colorParts[1] !== 'none') {
+        if (colorParts[1].endsWith('%')) {
+          C = (parseFloat(colorParts[1]) / 100) * 0.4;
+        } else {
+          C = parseFloat(colorParts[1]);
+        }
+      }
 
-      const r = +4.0767416621 * l - 3.3077115913 * m__ + 0.2309699292 * s;
-      const g = -1.2684380046 * l + 2.6097574011 * m__ - 0.3413193965 * s;
-      const b_val = -0.0041960863 * l - 0.7034186147 * m__ + 1.7076147010 * s;
+      // 3. Hue (H): degrees or "none" or rad / turn
+      let H = 0;
+      if (colorParts[2] !== 'none') {
+        if (colorParts[2].endsWith('deg')) {
+          H = parseFloat(colorParts[2]);
+        } else if (colorParts[2].endsWith('rad')) {
+          H = (parseFloat(colorParts[2]) * 180) / Math.PI;
+        } else if (colorParts[2].endsWith('turn')) {
+          H = parseFloat(colorParts[2]) * 360;
+        } else {
+          H = parseFloat(colorParts[2]);
+        }
+      }
 
+      // 4. Alpha: 0..1 or 0%..100%
+      let alpha = 1;
+      if (alphaPart && alphaPart !== 'none') {
+        if (alphaPart.endsWith('%')) {
+          alpha = parseFloat(alphaPart) / 100;
+        } else {
+          alpha = parseFloat(alphaPart);
+        }
+      }
+
+      if (isNaN(L)) L = 0;
+      if (isNaN(C)) C = 0;
+      if (isNaN(H)) H = 0;
+      if (isNaN(alpha)) alpha = 1;
+
+      // OKLCH -> OKLab coordinates
+      const hRad = (H * Math.PI) / 180;
+      const a_lab = C * Math.cos(hRad);
+      const b_lab = C * Math.sin(hRad);
+
+      // OKLab -> LMS
+      const l_ = L + 0.3963377774 * a_lab + 0.2158037573 * b_lab;
+      const m_ = L - 0.1055613458 * a_lab - 0.0638541728 * b_lab;
+      const s_ = L - 0.0894841775 * a_lab - 1.2914855480 * b_lab;
+
+      const l_cubed = l_ * l_ * l_;
+      const m_cubed = m_ * m_ * m_;
+      const s_cubed = s_ * s_ * s_;
+
+      // LMS -> Linear sRGB
+      const r_lin = +4.0767416621 * l_cubed - 3.3077115913 * m_cubed + 0.2309699292 * s_cubed;
+      const g_lin = -1.2684380046 * l_cubed + 2.6097574011 * m_cubed - 0.3413193965 * s_cubed;
+      const b_lin = -0.0041960863 * l_cubed - 0.7034186147 * m_cubed + 1.7076147010 * s_cubed;
+
+      // Gamma correction for standard sRGB
       const gamma = (x: number) => {
         const clamped = Math.max(0, Math.min(1, x));
         return clamped <= 0.0031308 ? 12.92 * clamped : 1.055 * Math.pow(clamped, 1 / 2.4) - 0.055;
       };
 
-      const R = Math.round(gamma(r) * 255);
-      const G = Math.round(gamma(g) * 255);
-      const B = Math.round(gamma(b_val) * 255);
+      const R = Math.round(gamma(r_lin) * 255);
+      const G = Math.round(gamma(g_lin) * 255);
+      const B = Math.round(gamma(b_lin) * 255);
 
-      if (alpha < 1) {
-        return `rgba(${R}, ${G}, ${B}, ${alpha})`;
+      if (alpha < 0.999) {
+        return `rgba(${R}, ${G}, ${B}, ${alpha.toFixed(3)})`;
       }
       return `rgb(${R}, ${G}, ${B})`;
     } catch {
-      return match;
+      return 'rgb(0, 0, 0)';
     }
   });
 }
 
 /**
  * Traverses a cloned DOM document and sanitizes all OKLCH colors
- * in inline styles, computed styles, stylesheets, and style tags to compatible RGB.
+ * in stylesheets, style tags, inline styles, and wraps getComputedStyle in a Proxy
+ * so html2canvas never receives an unparsed oklch() color function.
  */
 function sanitizeOklchInDocument(doc: Document): void {
   try {
-    // 1. Sanitize text content inside <style> tags
+    // 1. Recreate all <style> elements with sanitized sRGB CSS
     const styleTags = Array.from(doc.querySelectorAll('style'));
     for (const styleEl of styleTags) {
       if (styleEl.textContent && styleEl.textContent.includes('oklch')) {
-        styleEl.textContent = convertOklchToRgb(styleEl.textContent);
+        const newStyle = doc.createElement('style');
+        newStyle.textContent = convertOklchToRgb(styleEl.textContent);
+        if (styleEl.parentNode) {
+          styleEl.parentNode.replaceChild(newStyle, styleEl);
+        }
       }
     }
 
-    // 2. Sanitize inline styles and computed color properties on all elements
-    const COLOR_PROPS = [
-      'color',
-      'backgroundColor',
-      'borderColor',
-      'borderTopColor',
-      'borderRightColor',
-      'borderBottomColor',
-      'borderLeftColor',
-      'outlineColor',
-      'fill',
-      'stroke',
-      'boxShadow',
-      'textShadow',
-    ];
+    // 2. Wrap cloned window's getComputedStyle with a Proxy to intercept any remaining oklch values
+    const win = doc.defaultView;
+    if (win && typeof win.getComputedStyle === 'function') {
+      const origGetComputedStyle = win.getComputedStyle.bind(win);
+      win.getComputedStyle = function (elt: Element, pseudoElt?: string | null): CSSStyleDeclaration {
+        const computed = origGetComputedStyle(elt, pseudoElt);
+        return new Proxy(computed, {
+          get(target, prop, receiver) {
+            const val = Reflect.get(target, prop, receiver);
+            if (typeof val === 'function') {
+              return function (...args: any[]) {
+                const res = val.apply(target, args);
+                if (typeof res === 'string' && res.includes('oklch')) {
+                  return convertOklchToRgb(res);
+                }
+                return res;
+              };
+            }
+            if (typeof val === 'string' && val.includes('oklch')) {
+              return convertOklchToRgb(val);
+            }
+            return val;
+          },
+        });
+      };
+    }
 
+    // 3. Sanitize inline style attributes on all DOM elements
     const allElements = Array.from(doc.querySelectorAll('*'));
     for (const el of allElements) {
       const htmlEl = el as HTMLElement;
-
-      // Sanitize style attribute string if present
       const inlineStyle = htmlEl.getAttribute('style');
       if (inlineStyle && inlineStyle.includes('oklch')) {
         htmlEl.setAttribute('style', convertOklchToRgb(inlineStyle));
-      }
-
-      // Convert computed styles that evaluate to oklch
-      const computed = doc.defaultView?.getComputedStyle(htmlEl) || window.getComputedStyle(htmlEl);
-      if (computed) {
-        for (const prop of COLOR_PROPS) {
-          const val = (computed as any)[prop];
-          if (typeof val === 'string' && val.includes('oklch')) {
-            (htmlEl.style as any)[prop] = convertOklchToRgb(val);
-          }
-        }
       }
     }
   } catch (err) {
@@ -290,9 +354,9 @@ export async function downloadElementAsPdf(element: HTMLElement, filename: strin
  * student photo, institute logo, and clean A4 formatting.
  */
 export function printAdmissionRecord(app: AdmissionApplication, branch?: Branch): void {
-  const branchName = app.branchName || branch?.name || 'Main Branch';
-  const branchCode = app.branchCode || branch?.code || 'MAIN';
-  const branchAddress = branch?.address || app.address || 'Assam Center, India';
+  const branchName = app.branchName || branch?.name || 'Institutional Centre';
+  const branchCode = app.branchCode || branch?.code || 'IC';
+  const branchAddress = branch?.address || app.address || 'Assam, India';
   const branchPhone = branch?.phone || '8638611886';
   const enrollment = app.enrollmentId || app.enrollment_number || app.id;
   const admDate = app.admissionDate || (app.createdAt ? app.createdAt.split('T')[0] : new Date().toISOString().split('T')[0]);
@@ -549,7 +613,7 @@ export function printBranchWiseReport(
         <td style="font-family: monospace; font-weight: 700; color: #0051d5;">${a.enrollmentId || a.id}</td>
         <td style="font-weight: 700; color: #00163d;">${a.studentName}</td>
         <td>${a.guardianName}</td>
-        <td><strong>${a.branchName || 'Main Branch'}</strong> (${a.branchCode || 'MAIN'})</td>
+        <td><strong>${a.branchName || 'Institutional Centre'}</strong> (${a.branchCode || 'IC'})</td>
         <td style="font-weight: 600;">${a.course}</td>
         <td>${a.admissionDate || (a.createdAt ? a.createdAt.split('T')[0] : '')}</td>
         <td style="font-family: monospace;">${a.phone}</td>
@@ -654,8 +718,8 @@ export function printBranchWiseReport(
  * enrollment number, roll number, course, center/branch, and tamper-proof security signatures.
  */
 export function printStudentSlipFromRecord(student: StudentRecord): void {
-  const branchName = student.branchName || student.center || 'Main Branch';
-  const branchCode = student.branchCode || 'MAIN';
+  const branchName = student.branchName || student.center || 'Institutional Centre';
+  const branchCode = student.branchCode || 'IC';
   const enrollment = student.enrollmentId;
   const rollNo = student.rollNo || `IAIT-${enrollment.slice(-4)}`;
   const certSerial = student.certSerial || `IAIT/CERT/${new Date().getFullYear()}/${enrollment}`;
